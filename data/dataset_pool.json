@@ -8,22 +8,6 @@
     "description": "酒店评论 ChnSentiCorp"
   },
   {
-    "id": "shibing624/chnsenti",
-    "config": null,
-    "split": "train",
-    "text_fields": ["text"],
-    "max_samples": 500,
-    "description": "外卖评论 ChnSenti"
-  },
-  {
-    "id": "huggingface-course/codeparrot-github-issues-zh",
-    "config": null,
-    "split": "train",
-    "text_fields": ["title", "body"],
-    "max_samples": 300,
-    "description": "GitHub 中文 issue"
-  },
-  {
     "id": "BAAI/COIG-PC",
     "config": "cc_strict",
     "split": "train",
@@ -40,22 +24,6 @@
     "description": "Belle 中文指令(350 万)"
   },
   {
-    "id": "lansinuote/6.2.chinese_classification_corpus",
-    "config": null,
-    "split": "train",
-    "text_fields": ["text"],
-    "max_samples": 500,
-    "description": "中文分类语料"
-  },
-  {
-    "id": "lansinuote/diffsion_from_scratch.chinese_text",
-    "config": null,
-    "split": "train",
-    "text_fields": ["text"],
-    "max_samples": 500,
-    "description": "古诗续写素材(知乎爬取)"
-  },
-  {
     "id": "FreedomIntelligence/medical-o1-reasoning-SFT",
     "config": "zh",
     "split": "train",
@@ -64,19 +32,35 @@
     "description": "医学推理(中文)"
   },
   {
-    "id": "Cohere/wikipedia-22-12-zh-embed",
+    "id": "BAAI/CCI3-HQ",
     "config": null,
     "split": "train",
     "text_fields": ["text"],
     "max_samples": 300,
-    "description": "Cohere 中文 wiki 嵌入语料"
+    "description": "智源 CCI3 高质量中文网页"
   },
   {
-    "id": "CubEAU/Chinese-Medicine-1k",
+    "id": "shibing624/nli_zh",
+    "config": "ATEC",
+    "split": "train",
+    "text_fields": ["sentence1", "sentence2"],
+    "max_samples": 400,
+    "description": "中文 NLI 句对(ATEC)"
+  },
+  {
+    "id": "nlp-guild/renminribao",
     "config": null,
     "split": "train",
     "text_fields": ["text"],
     "max_samples": 300,
-    "description": "中医常识(1k)"
+    "description": "人民日报语料"
+  },
+  {
+    "id": "hfl/rte",
+    "config": null,
+    "split": "train",
+    "text_fields": ["sentence1", "sentence2"],
+    "max_samples": 300,
+    "description": "CLUE RTE 中文推理"
   }
 ]

@@ -54,20 +54,25 @@ import time
 
 
 def with_retry(fn, attempts: int = 3, base_delay: float = 2.0):
-    """简单重试:只对网络/Hub 临时错误做指数退避,代码错误直接抛。"""
+    """简单重试:只对网络/Hub 临时错误做指数退避。
+    永久错误(NotFound/Forbidden/Unauthorized/代码错误)直接抛,不浪费重试。"""
+    NON_RETRY = ("NotFound", "Forbidden", "Unauthorized", "BadRequest",
+                 "TypeError", "ValueError", "AttributeError", "ImportError")
     def wrapped(*args, **kwargs):
         last_err = None
         for i in range(attempts):
             try:
                 return fn(*args, **kwargs)
-            except (TypeError, ValueError, AttributeError, ImportError):
-                raise   # 代码错误,不重试
             except Exception as e:
+                err_name = type(e).__name__
+                # 永久错误:不重试
+                if any(x in err_name for x in NON_RETRY):
+                    raise
                 last_err = e
                 if i < attempts - 1:
                     delay = base_delay * (2 ** i)
                     print(f"[WARN] {fn.__name__} 第 {i+1}/{attempts} 次失败 "
-                          f"({type(e).__name__}: {str(e)[:80]}),"
+                          f"({err_name}: {str(e)[:80]}),"
                           f"{delay:.1f}s 后重试 ...", file=sys.stderr)
                     time.sleep(delay)
         raise last_err

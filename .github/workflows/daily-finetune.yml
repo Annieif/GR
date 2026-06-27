@@ -192,9 +192,10 @@ jobs:
           python data/fetch_random_data.py --validate_only --max_samples 10 || echo "::warning::候选池里部分数据集失效(详见上方)"
           echo "<<<<< validate_only 完成"
 
-      # ---------- 6. 拉取一个随机新数据集 ----------
+      # ---------- 6. 拉取一个随机新数据集(失败不中断流程)----------
       - name: Fetch random Chinese dataset
         if: github.event.inputs.fetch_random_data == 'true'
+        continue-on-error: true
         env:
           HF_TOKEN: ${{ secrets.HF_TOKEN }}
           HF_HUB_DISABLE_PROGRESS_BARS: '1'
@@ -202,12 +203,15 @@ jobs:
           set -euo pipefail
           MAX="${{ github.event.inputs.max_random_samples || '300' }}"
           echo ">>>>> fetching a random dataset (max_samples=$MAX)"
-          python data/fetch_random_data.py --max_samples "$MAX" --max_attempts 4
-          echo "<<<<< fetch finished"
-          echo "--- 拉取后状态 ---"
-          cat data/used_datasets.json
-          echo "--- 新增文件 ---"
-          ls -la data/extra_corpora/ | tail -5
+          if python data/fetch_random_data.py --max_samples "$MAX" --max_attempts 8; then
+            echo "<<<<< fetch finished"
+            echo "--- 拉取后状态 ---"
+            cat data/used_datasets.json
+            echo "--- 新增文件 ---"
+            ls -la data/extra_corpora/ | tail -5
+          else
+            echo "::warning::拉取失败,本次只用已有语料训练(下个 cron 再试新数据)"
+          fi
 
       # ---------- 6.5 下载上一个 release 的模型(实现跨日累积微调)----------
       - name: Download previous fine-tuned model from latest release
