@@ -48,6 +48,9 @@ GR/
 
 ## 🚀 使用方式
 
+> 🎯 **默认 = 完整体验**:`use_momo=true`(MoE+Multi-LoRA) · `fetch_random_data=true`(自动拉新数据集) · `skip_base_eval=false`(base vs ft 对比) · `push_to_hub=false`(需 secret 才推送)
+> 点 Run workflow 不改任何参数,就能跑出完整 pipeline。
+
 ### 1. 直接使用
 - Fork / push 到 GitHub,启用 Actions
 - 每天 UTC 02:00 自动跑一次(北京时间 10:00)
@@ -55,17 +58,20 @@ GR/
 
 ### 2. 手动触发参数(关键)
 
+> **默认就是「完整体验」**:MoE+Multi-LoRA ✅ · 自动拉新数据集 ✅ · 自动评估 ✅ · 日志 commit ✅
+> **HF Hub 推送默认关闭**(需要 secret token,在 `push_to_hub=true` 时才生效)
+
 | 输入 | 默认 | 说明 |
 | --- | --- | --- |
 | `model_name` | `hfl/chinese-macbert-base` | 任何纯 PyTorch 中文模型 |
 | `epochs` | `3` | 训练轮数 |
 | `batch_size` | `16` | 每设备 batch size |
-| `fetch_random_data` | `true` | 本次是否拉取一个未用过的随机数据集 |
-| `max_random_samples` | `300` | 拉取数据集最多取多少条 |
-| `use_lora` | `false` | 启用 PEFT LoRA |
+| `fetch_random_data` | **`true`** | 本次是否拉取一个未用过的随机数据集(自动扩语料) |
+| `max_random_samples` | **`500`** | 拉取数据集最多取多少条 |
+| `use_lora` | `false` | 启用 PEFT LoRA(与 `use_momo` 互斥) |
 | `lora_r` / `lora_alpha` / `lora_dropout` | 8 / 16 / 0.1 | PEFT LoRA 超参 |
 | `merge_lora` | `true` | 训练后把 LoRA 合并回 base |
-| **`use_momo`** | **`false`** | **启用 MoE + Multi-LoRA(核心新功能)** |
+| **`use_momo`** | **`true`** | **启用 MoE + Multi-LoRA(完整体验核心)** |
 | `momo_n_experts` | 4 | 专家数 |
 | `momo_top_k` | 2 | top-k 路由 |
 | `momo_lora_r` | 8 | 单个 LoRA expert 的秩 |
@@ -73,7 +79,7 @@ GR/
 | `momo_target` | `query,value` | 注入目标 Linear 名称 |
 | `momo_aux_alpha` | 0.01 | 负载均衡 loss 系数 |
 | `skip_base_eval` | `false` | 跳过 base 评估(加速) |
-| `push_to_hub` | `false` | 推送到 HF Hub(需 HF_TOKEN secret) |
+| `push_to_hub` | **`false`** | 推送到 HF Hub(需 HF_TOKEN secret) |
 | `hub_repo_id` | 空 | HF Hub 仓库名 |
 
 ### 3. 三种训练模式

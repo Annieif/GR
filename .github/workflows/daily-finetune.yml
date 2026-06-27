@@ -42,9 +42,9 @@ on:
         default: true
         type: boolean
       use_momo:
-        description: '启用 MoE + Multi-LoRA(自定义 momo_lora.py)'
+        description: '启用 MoE + Multi-LoRA(自定义 momo_lora.py)。默认开启,关掉可换 PEFT LoRA 或全参'
         required: false
-        default: false
+        default: true
         type: boolean
       momo_n_experts:
         description: 'MoMo 专家数(仅在 use_momo=true 时生效)'
@@ -71,14 +71,14 @@ on:
         required: false
         default: '0.01'
       fetch_random_data:
-        description: '本次运行是否拉取一个随机新数据集'
+        description: '本次运行是否拉取一个随机新数据集(默认开启,自动扩语料)'
         required: false
         default: true
         type: boolean
       max_random_samples:
-        description: '随机拉取的数据集最多取多少条'
+        description: '随机拉取的数据集最多取多少条(默认 500,完整体验)'
         required: false
-        default: '300'
+        default: '500'
       skip_base_eval:
         description: '跳过 base 模型评估(只评微调后,加速)'
         required: false
