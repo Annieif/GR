@@ -5,6 +5,12 @@
       "timestamp": "20260627_071436",
       "n_samples": 300,
       "out_path": "data/extra_corpora/20260627_071436_BelleGroup_train_3.5M_CN.txt"
+    },
+    {
+      "id": "shibing624/nli_zh",
+      "timestamp": "20260627_072714",
+      "n_samples": 400,
+      "out_path": "data/extra_corpora/20260627_072714_shibing624_nli_zh.txt"
     }
   ],
   "history": [
@@ -14,6 +20,13 @@
       "n_samples": 300,
       "out_path": "data/extra_corpora/20260627_071436_BelleGroup_train_3.5M_CN.txt",
       "description": "Belle 中文指令(350 万)"
+    },
+    {
+      "id": "shibing624/nli_zh",
+      "timestamp": "20260627_072714",
+      "n_samples": 400,
+      "out_path": "data/extra_corpora/20260627_072714_shibing624_nli_zh.txt",
+      "description": "中文 NLI 句对(ATEC)"
     }
   ]
 }
