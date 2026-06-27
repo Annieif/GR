@@ -117,13 +117,48 @@ y = base(x)                               ← frozen
 每次 workflow 会:
 1. 读 `data/used_datasets.json` 拿「已用集」
 2. 从 `data/dataset_pool.json` 候选池里随机选一个未用过的
-3. `datasets.load_dataset(...)` 拉取
-4. 抽若干条纯文本 → 写到 `data/extra_corpora/<ts>_<id>.txt`
-5. 更新 `used_datasets.json`,把 manifest 增量 commit 回 main
-6. 下次运行天然避开已用的,直到所有候选跑过一遍后再允许重复
+3. `HfApi.dataset_info()` **预校验存在性**(HEAD 风格,跳过不存在的)
+4. `datasets.load_dataset(...)` 拉取
+5. 按 `text_fields` 抽纯文本 → 写 `data/extra_corpora/<ts>_<id>.txt`
+6. 抽不到时**自动回退**:尝试任意 string 字段,再回退到 `conversations`/`ShareGPT`/`ChatML` 嵌套 list
+7. 更新 `used_datasets.json`,把 manifest 增量 commit 回 main
+8. 下次运行天然避开已用的,直到所有候选跑过一遍后再允许重复
 
-候选池涵盖:古诗、文学评论、GitHub issues、指令微调、医学/中医/心理学问答、
-分类语料、论文摘要等。`fetch_random_data.py` 内置重试,最多试 4 个候选。
+候选池涵盖:评论、指令微调、医学推理、GitHub issues、维基嵌入语料等。
+`fetch_random_data.py` 会在日志里打 `✓/✗` 标记每个候选是否真实存在。
+
+#### 调试候选池
+
+```bash
+# 只校验,不实际拉取
+python data/fetch_random_data.py --validate_only
+```
+
+输出形如:
+```
+[INFO] 候选池 10 个,未用过 10 个,开始预校验 ...
+  ✓ seamew/ChnSentiCorp
+  ✗ shibing624/chnsenti (DatasetNotFoundError: ...)
+  ...
+[validate_only] 7/10 个候选可用
+```
+
+根据结果,把不存在的从 `data/dataset_pool.json` 删掉或换成真实的即可。
+
+#### 候选池字段说明
+
+```json
+{
+  "id": "owner/repo",
+  "config": "可选 config 名,比如 zh / cc_strict",
+  "split": "train",
+  "text_fields": ["question", "answer"],   // 优先拼接的字段
+  "max_samples": 500,                        // 该数据集最多取多少条
+  "description": "中文描述"
+}
+```
+
+`text_fields` 写错也没关系,`extract_text_from_row` 会自动探测 string 字段和 conversations 嵌套。
 
 ### 5. 评估指标
 
