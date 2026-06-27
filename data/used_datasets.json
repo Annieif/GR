@@ -1,1 +1,19 @@
-{"used": [], "history": []}
+{
+  "used": [
+    {
+      "id": "BelleGroup/train_3.5M_CN",
+      "timestamp": "20260627_071436",
+      "n_samples": 300,
+      "out_path": "data/extra_corpora/20260627_071436_BelleGroup_train_3.5M_CN.txt"
+    }
+  ],
+  "history": [
+    {
+      "id": "BelleGroup/train_3.5M_CN",
+      "timestamp": "20260627_071436",
+      "n_samples": 300,
+      "out_path": "data/extra_corpora/20260627_071436_BelleGroup_train_3.5M_CN.txt",
+      "description": "Belle 中文指令(350 万)"
+    }
+  ]
+}
