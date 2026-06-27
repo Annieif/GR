@@ -1,4 +1,4 @@
-name: Daily Chinese BERT Fine-tune
+name: Daily Chinese BERT Fine-tune + Evaluate
 
 on:
   # 每天 UTC 02:00 触发(北京时间 10:00),错峰使用 runner
@@ -19,8 +19,35 @@ on:
         description: '每设备 batch size'
         required: false
         default: '16'
+      use_lora:
+        description: '启用 LoRA(PEFT)微调,节省显存/磁盘'
+        required: false
+        default: false
+        type: boolean
+      lora_r:
+        description: 'LoRA 秩(仅在 use_lora=true 时生效)'
+        required: false
+        default: '8'
+      lora_alpha:
+        description: 'LoRA alpha(仅在 use_lora=true 时生效)'
+        required: false
+        default: '16'
+      lora_dropout:
+        description: 'LoRA dropout(仅在 use_lora=true 时生效)'
+        required: false
+        default: '0.1'
+      merge_lora:
+        description: '训练后把 LoRA 合并回 base 并保存(evaluate.py 无需感知 LoRA)'
+        required: false
+        default: true
+        type: boolean
+      skip_base_eval:
+        description: '跳过 base 模型评估(只评微调后,加速)'
+        required: false
+        default: false
+        type: boolean
       push_to_hub:
-        description: '是否推送到 HuggingFace Hub (需配置 HF_TOKEN secret)'
+        description: '推送到 HuggingFace Hub (需配置 HF_TOKEN secret)'
         required: false
         default: false
         type: boolean
@@ -36,7 +63,7 @@ concurrency:
 
 jobs:
   finetune:
-    name: 每日中文 MLM 微调
+    name: 每日中文 MLM 微调 + 评估
     runs-on: ubuntu-latest
     timeout-minutes: 60
     permissions:
@@ -85,13 +112,13 @@ jobs:
           python -m pip install --upgrade pip
           pip install -r requirements.txt
           echo "--- 关键版本 ---"
-          python -c "import torch, transformers, datasets; print(f'torch={torch.__version__}'); print(f'transformers={transformers.__version__}'); print(f'datasets={datasets.__version__}')"
+          python -c "import torch, transformers, datasets, peft; print(f'torch={torch.__version__}'); print(f'transformers={transformers.__version__}'); print(f'datasets={datasets.__version__}'); print(f'peft={peft.__version__}')"
 
       # ---------- 5. 检查数据 ----------
-      - name: Verify training corpus
+      - name: Verify corpora
         run: |
           wc -l data/corpus.txt
-          head -3 data/corpus.txt
+          wc -l data/eval.txt
 
       # ---------- 6. 跑微调 ----------
       - name: Run MLM fine-tuning
@@ -105,8 +132,21 @@ jobs:
           MODEL_NAME="${{ github.event.inputs.model_name || 'hfl/chinese-macbert-base' }}"
           EPOCHS="${{ github.event.inputs.epochs || '3' }}"
           BATCH_SIZE="${{ github.event.inputs.batch_size || '16' }}"
+          USE_LORA="${{ github.event.inputs.use_lora }}"
+          LORA_R="${{ github.event.inputs.lora_r || '8' }}"
+          LORA_ALPHA="${{ github.event.inputs.lora_alpha || '16' }}"
+          LORA_DROPOUT="${{ github.event.inputs.lora_dropout || '0.1' }}"
+          MERGE_LORA="${{ github.event.inputs.merge_lora }}"
 
-          echo ">>>>> start training: model=$MODEL_NAME epochs=$EPOCHS bs=$BATCH_SIZE"
+          echo ">>>>> start training: model=$MODEL_NAME epochs=$EPOCHS bs=$BATCH_SIZE lora=$USE_LORA"
+          EXTRA=()
+          if [ "$USE_LORA" = "true" ]; then
+            EXTRA+=(--use_lora --lora_r "$LORA_R" --lora_alpha "$LORA_ALPHA" --lora_dropout "$LORA_DROPOUT")
+            if [ "$MERGE_LORA" = "true" ]; then
+              EXTRA+=(--merge_lora)
+            fi
+          fi
+
           python train.py \
             --model_name "$MODEL_NAME" \
             --data_path data/corpus.txt \
@@ -115,21 +155,83 @@ jobs:
             --batch_size "$BATCH_SIZE" \
             --lr 5e-5 \
             --max_len 128 \
-            --seed 42
+            --seed 42 \
+            "${EXTRA[@]}"
           echo "<<<<< training finished"
 
-      # ---------- 7. 备份训练日志 ----------
-      - name: Archive training log
+      # ---------- 7. 评估 base + 微调后模型 ----------
+      - name: Run evaluation
+        env:
+          HF_HUB_DISABLE_PROGRESS_BARS: '1'
+          TOKENIZERS_PARALLELISM: 'false'
+        run: |
+          set -euo pipefail
+          MODEL_NAME="${{ github.event.inputs.model_name || 'hfl/chinese-macbert-base' }}"
+          SKIP_BASE="${{ github.event.inputs.skip_base_eval }}"
+
+          EXTRA=()
+          if [ "$SKIP_BASE" = "true" ]; then
+            EXTRA+=(--skip_base)
+          fi
+
+          echo ">>>>> start evaluation"
+          python evaluate.py \
+            --base_model "$MODEL_NAME" \
+            --ft_model output \
+            --eval_data data/eval.txt \
+            --report_path output/eval_report.json \
+            --batch_size 16 \
+            "${EXTRA[@]}"
+          echo "<<<<< evaluation finished"
+          # 打印 eval 摘要
+          python - <<'PY'
+          import json
+          with open("output/eval_report.json", "r", encoding="utf-8") as f:
+              r = json.load(f)
+          print("=== Eval Summary ===")
+          for who in ("base", "finetuned"):
+              if who not in r: continue
+              x = r[who]
+              print(f"[{who}] ppl={x.get('perplexity')}  top1={x.get('top1_acc')}  top5={x.get('top5_acc')}")
+          if "comparison" in r and r["comparison"]:
+              c = r["comparison"].get("perplexity", {})
+              if c:
+                  print(f"  Δ ppl: {c.get('base')} -> {c.get('ft')}  ({c.get('delta'):+.4f}, better={c.get('better')})")
+          PY
+
+      # ---------- 8. 备份训练日志和评估报告 ----------
+      - name: Archive training & eval logs
         if: always()
         run: |
           mkdir -p logs/history
           ts=$(date -u +%Y%m%d_%H%M%S)
-          if [ -f output/training_log.json ]; then
-            cp output/training_log.json "logs/history/${ts}_training_log.json"
-            echo "Saved logs/history/${ts}_training_log.json"
-          fi
+          [ -f output/training_log.json ] && cp output/training_log.json "logs/history/${ts}_training_log.json"
+          [ -f output/eval_report.json ]   && cp output/eval_report.json   "logs/history/${ts}_eval_report.json"
+          # 再写一个一行摘要,便于 git diff 看每天趋势
+          python - <<'PY'
+          import json, os, datetime
+          ts = datetime.datetime.utcnow().strftime("%Y%m%d_%H%M%S")
+          summary = {"timestamp": ts}
+          for name, p in [("train", "output/training_log.json"), ("eval", "output/eval_report.json")]:
+              if os.path.exists(p):
+                  with open(p, "r", encoding="utf-8") as f:
+                      d = json.load(f)
+                  if name == "train":
+                      summary["train_loss"] = d.get("train_loss")
+                      summary["train_runtime_sec"] = d.get("train_runtime_sec")
+                      summary["use_lora"] = d.get("use_lora", False)
+                  else:
+                      summary["ppl_base"]   = d.get("base", {}).get("perplexity")
+                      summary["ppl_ft"]     = d.get("finetuned", {}).get("perplexity")
+                      summary["top1_ft"]    = d.get("finetuned", {}).get("top1_acc")
+                      summary["top5_ft"]    = d.get("finetuned", {}).get("top5_acc")
+          out = f"logs/history/{ts}_summary.json"
+          with open(out, "w", encoding="utf-8") as f:
+              json.dump(summary, f, ensure_ascii=False, indent=2)
+          print("Wrote", out)
+          PY
 
-      # ---------- 8. 上传模型为 artifact ----------
+      # ---------- 9. 上传模型为 artifact ----------
       - name: Upload fine-tuned model
         if: success()
         uses: actions/upload-artifact@v4
@@ -139,18 +241,18 @@ jobs:
           retention-days: 30
           if-no-files-found: warn
 
-      # ---------- 9. 上传训练日志为 artifact ----------
-      - name: Upload training logs
+      # ---------- 10. 上传日志为 artifact ----------
+      - name: Upload training & eval logs
         if: always()
         uses: actions/upload-artifact@v4
         with:
-          name: training-logs-${{ github.run_id }}
+          name: logs-${{ github.run_id }}
           path: logs/
           retention-days: 90
           if-no-files-found: warn
 
-      # ---------- 10. 把日志 commit 回仓库 ----------
-      - name: Commit training log back to main
+      # ---------- 11. 把日志 commit 回仓库 ----------
+      - name: Commit logs back to main
         if: always()
         run: |
           git config user.name  "github-actions[bot]"
@@ -159,12 +261,12 @@ jobs:
           if git diff --cached --quiet; then
             echo "No log changes to commit."
           else
-            git commit -m "chore(training): log @ $(date -u +%FT%TZ)"
+            git commit -m "chore(training+eval): log @ $(date -u +%FT%TZ)"
             git push
-            echo "Pushed log to main."
+            echo "Pushed logs to main."
           fi
 
-      # ---------- 11. 可选:推送到 HuggingFace Hub ----------
+      # ---------- 12. 可选:推送到 HuggingFace Hub ----------
       - name: Push to HuggingFace Hub
         if: |
           github.event_name == 'workflow_dispatch' &&
@@ -191,7 +293,7 @@ jobs:
               folder_path='./output',
               repo_id=repo_id,
               repo_type='model',
-              commit_message='Daily fine-tune @ ' + os.popen('date -u +%FT%TZ').read().strip(),
+              commit_message='Daily fine-tune + eval @ ' + os.popen('date -u +%FT%TZ').read().strip(),
           )
           print(f'Pushed to https://huggingface.co/{repo_id}')
           PY
