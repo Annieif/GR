@@ -348,13 +348,15 @@ def main() -> None:
             print(f"[WARN] 保存 PEFT adapter 备份失败(可忽略): {e}")
     elif used_momo:
         from momo_lora import merge_momo_into_base
+        # 先保存 MoMo adapter(必须在 merge 之前,merge 会原地替换 MoLoRALinear)
+        adapter_dir = os.path.join(args.output_dir, "adapter")
+        save_momo_checkpoint(model, tokenizer, adapter_dir,
+                             base_model_name=args.model_name)
+        # 再合并并保存完整模型
         print("[INFO] 合并 MoMo 到 base(均匀近似),存为完整模型")
         merged = merge_momo_into_base(model)
         merged.save_pretrained(args.output_dir, safe_serialization=True)
         tokenizer.save_pretrained(args.output_dir)
-        adapter_dir = os.path.join(args.output_dir, "adapter")
-        save_momo_checkpoint(model, tokenizer, adapter_dir,
-                             base_model_name=args.model_name)
     else:
         trainer.save_model(args.output_dir)
         tokenizer.save_pretrained(args.output_dir)

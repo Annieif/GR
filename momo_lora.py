@@ -95,7 +95,7 @@ class MoLoRALinear(nn.Module):
         #   out_per_expert = hidden @ B.T -> (..., n, out)
         x_drop = self.lora_dropout(x)
         hidden = torch.einsum('...i,nri->...nr', x_drop, self.lora_A)   # (..., n, r)
-        out_per_expert = torch.einsum('...nr,noi->...no', hidden, self.lora_B)  # (..., n, out)
+        out_per_expert = torch.einsum('...nr,nor->...no', hidden, self.lora_B)  # (..., n, out)
         out_per_expert = out_per_expert * self.scaling
 
         # 路由权重:对每个 expert,累加它在 top-k 中被选中的概率
@@ -239,8 +239,7 @@ def save_momo_checkpoint(model: nn.Module, tokenizer, output_dir: str,
     from safetensors.torch import save_file
 
     output_dir = Path(output_dir)
-    adapter_dir = output_dir / "adapter"
-    adapter_dir.mkdir(parents=True, exist_ok=True)
+    output_dir.mkdir(parents=True, exist_ok=True)
 
     # 收集所有 MoLoRA 参数
     state = {}
@@ -250,7 +249,7 @@ def save_momo_checkpoint(model: nn.Module, tokenizer, output_dir: str,
             state[f"{name}.lora_B"] = m.lora_B.detach().cpu()
             state[f"{name}.router.weight"] = m.router.weight.detach().cpu()
 
-    save_file(state, str(adapter_dir / "adapter_model.safetensors"))
+    save_file(state, str(output_dir / "adapter_model.safetensors"))
 
     # 配置
     cfg = {
@@ -264,13 +263,13 @@ def save_momo_checkpoint(model: nn.Module, tokenizer, output_dir: str,
         "aux_loss_alpha": getattr(model, "_momo_aux_loss_alpha", None),
         "target_module_names": getattr(model, "_momo_targets", None),
     }
-    with open(adapter_dir / "adapter_config.json", "w", encoding="utf-8") as f:
+    with open(output_dir / "adapter_config.json", "w", encoding="utf-8") as f:
         json.dump(cfg, f, ensure_ascii=False, indent=2)
 
     # tokenizer
     tokenizer.save_pretrained(str(output_dir))
 
-    print(f"[INFO] MoLoRA adapter saved to {adapter_dir} ({len(state)} tensors)")
+    print(f"[INFO] MoLoRA adapter saved to {output_dir} ({len(state)} tensors)")
 
 
 def load_momo_checkpoint(model: nn.Module, adapter_dir: str,
