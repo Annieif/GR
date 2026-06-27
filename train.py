@@ -15,6 +15,8 @@
   python train.py --use_lora --merge_lora            # LoRA 微调并合并
   python train.py --use_momo                         # MoE + Multi-LoRA
   python train.py --use_momo --momo_n_experts 8 --momo_top_k 2
+  python train.py --max_steps 100               # 快速试跑(只跑 100 步)
+  python train.py --resume_from_checkpoint output/checkpoint-100   # 断点续训
 """
 from __future__ import annotations
 
@@ -69,6 +71,10 @@ def parse_args() -> argparse.Namespace:
     p.add_argument("--weight_decay", type=float, default=0.01)
     p.add_argument("--seed", type=int, default=42)
     p.add_argument("--log_steps", type=int, default=20)
+    p.add_argument("--max_steps", type=int, default=-1,
+                   help="训练最大步数(默认 -1 = 用 epochs),用于快速试跑或限速")
+    p.add_argument("--resume_from_checkpoint", default=None,
+                   help="从某个 checkpoint 目录恢复训练(transformers Trainer 原生支持)")
     p.add_argument("--save_total_limit", type=int, default=1)
 
     # ---- PEFT LoRA ----
@@ -254,6 +260,7 @@ def main() -> None:
         output_dir=args.output_dir,
         overwrite_output_dir=True,
         num_train_epochs=args.epochs,
+        max_steps=args.max_steps,
         per_device_train_batch_size=args.batch_size,
         gradient_accumulation_steps=args.grad_accum,
         learning_rate=args.lr,
@@ -278,26 +285,59 @@ def main() -> None:
     )
 
     t0 = time.time()
-    train_result = trainer.train()
+    train_result = trainer.train(resume_from_checkpoint=args.resume_from_checkpoint)
     train_seconds = time.time() - t0
 
-    # 7. 保存
+    # 7. 保存 — output/ 始终包含「merged 完整 HF 模型」+ tokenizer,便于打包进 release
+    #              训练产生的原始 adapter(PEFT-LoRA / MoMo)单独存到 output/adapter/ 子目录
     if used_peft_lora and args.merge_lora:
         print("[INFO] 合并 LoRA 到 base 并保存完整模型")
         merged = model.merge_and_unload()
         merged.save_pretrained(args.output_dir, safe_serialization=True)
         tokenizer.save_pretrained(args.output_dir)
+        try:
+            model.save_pretrained(os.path.join(args.output_dir, "adapter"))
+        except Exception as e:
+            print(f"[WARN] 保存 PEFT adapter 备份失败(可忽略): {e}")
     elif used_peft_lora:
-        print("[INFO] 仅保存 LoRA adapter")
-        model.save_pretrained(os.path.join(args.output_dir, "adapter"))
+        print("[INFO] 额外合并 LoRA 到 base 存为完整模型;adapter 也存到子目录")
+        merged = model.merge_and_unload()
+        merged.save_pretrained(args.output_dir, safe_serialization=True)
         tokenizer.save_pretrained(args.output_dir)
+        try:
+            model.save_pretrained(os.path.join(args.output_dir, "adapter"))
+        except Exception as e:
+            print(f"[WARN] 保存 PEFT adapter 备份失败(可忽略): {e}")
     elif used_momo:
-        print("[INFO] 保存 MoMo adapter + tokenizer")
-        save_momo_checkpoint(model, tokenizer, args.output_dir,
+        from momo_lora import merge_momo_into_base
+        print("[INFO] 合并 MoMo 到 base(均匀近似),存为完整模型")
+        merged = merge_momo_into_base(model)
+        merged.save_pretrained(args.output_dir, safe_serialization=True)
+        tokenizer.save_pretrained(args.output_dir)
+        adapter_dir = os.path.join(args.output_dir, "adapter")
+        save_momo_checkpoint(model, tokenizer, adapter_dir,
                              base_model_name=args.model_name)
     else:
         trainer.save_model(args.output_dir)
         tokenizer.save_pretrained(args.output_dir)
+
+    print(f"[INFO] output/ 内已包含 merged 完整模型,可直接 AutoModelForMaskedLM.from_pretrained 加载")
+
+    # 9. 列出 output/ 实际产物,方便排查
+    print(f"[INFO] output/ 产物清单:")
+    for root, dirs, files in os.walk(args.output_dir):
+        # 排除大体积文件
+        for f in sorted(files):
+            full = os.path.join(root, f)
+            try:
+                size = os.path.getsize(full)
+                rel = os.path.relpath(full, args.output_dir)
+                if size > 1024 * 1024:
+                    print(f"  {rel}  ({size/1024/1024:.1f} MB)")
+                else:
+                    print(f"  {rel}  ({size/1024:.1f} KB)")
+            except OSError:
+                pass
 
     # 8. 写训练指标
     log_path = Path(args.output_dir) / "training_log.json"

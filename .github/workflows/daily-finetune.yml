@@ -93,6 +93,20 @@ on:
         description: 'HF Hub 仓库 ID,形如 username/repo-name'
         required: false
         default: ''
+      use_previous_model:
+        description: '从上一个 Release 下载上次微调后的完整模型作为本次起点(默认开启,实现跨日累积微调)。第一次或找不到 release 时回退到 model_name'
+        required: false
+        default: true
+        type: boolean
+      auto_release:
+        description: '本次跑完后自动创建 GitHub Release(包含 model.zip + 评估/训练日志)。默认开启'
+        required: false
+        default: true
+        type: boolean
+      release_zip_name:
+        description: 'Release 附件 zip 文件名(默认 model.zip)'
+        required: false
+        default: 'model.zip'
 
 # 防止旧 workflow 占用 runner
 concurrency:
@@ -143,6 +157,15 @@ jobs:
             hf-${{ runner.os }}-${{ hashFiles('requirements.txt') }}-
             hf-${{ runner.os }}-
 
+      # ---------- 3.5 缓存 previous_model(避免每次都重新下载)----------
+      - name: Cache previous_model
+        uses: actions/cache@v4
+        with:
+          path: previous_model
+          key: prev-model-${{ runner.os }}-${{ github.run_id }}
+          restore-keys: |
+            prev-model-${{ runner.os }}-
+
       # ---------- 4. 安装依赖 ----------
       - name: Install Python dependencies
         run: |
@@ -177,6 +200,65 @@ jobs:
           echo "--- 新增文件 ---"
           ls -la data/extra_corpora/ | tail -5
 
+      # ---------- 6.5 下载上一个 release 的模型(实现跨日累积微调)----------
+      - name: Download previous fine-tuned model from latest release
+        if: github.event.inputs.use_previous_model == 'true'
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          set -euo pipefail
+          rm -rf previous_model
+          echo ">>>>> 查找最新 release"
+          # 找最近一个含 model.zip 的 release(忽略无 model.zip 的早期 release)
+          TAG=$(gh release list --limit 30 --json tagName,assets \
+                  --jq '.[] | select(.assets | length > 0) | .tagName' \
+              | grep -E '^(daily|release)-' | head -n 1 || true)
+          if [ -z "${TAG:-}" ]; then
+            echo "::warning::未找到包含 model.zip 的历史 release,本次从 base 模型开始"
+            echo "USE_PREV=false" >> "$GITHUB_ENV"
+            exit 0
+          fi
+          echo ">>>>> 下载 release ${TAG} 的 model.zip"
+          if ! gh release download "$TAG" --pattern "model.zip" --dir previous_zip --clobber; then
+            echo "::warning::下载 model.zip 失败,回退到 base 模型"
+            echo "USE_PREV=false" >> "$GITHUB_ENV"
+            exit 0
+          fi
+          ls -la previous_zip/
+          if [ ! -f previous_zip/model.zip ]; then
+            echo "::warning::model.zip 不存在,回退到 base 模型"
+            echo "USE_PREV=false" >> "$GITHUB_ENV"
+            exit 0
+          fi
+          mkdir -p previous_model
+          unzip -q previous_zip/model.zip -d previous_model
+          # 校验是否是 HF 完整模型(必须有 config.json)
+          if [ ! -f previous_model/config.json ]; then
+            echo "::warning::解压后无 config.json,不是有效 HF 模型,回退到 base 模型"
+            rm -rf previous_model
+            echo "USE_PREV=false" >> "$GITHUB_ENV"
+            exit 0
+          fi
+          echo ">>>>> previous_model 准备就绪:"
+          ls previous_model/
+          echo "PREV_TAG=$TAG" >> "$GITHUB_ENV"
+          echo "USE_PREV=true" >> "$GITHUB_ENV"
+
+      # ---------- 6.6 验证 previous_model 状态 ----------
+      - name: Verify previous_model ready
+        if: always() && github.event.inputs.use_previous_model == 'true'
+        run: |
+          echo "USE_PREV=${USE_PREV:-false}"
+          echo "PREV_TAG=${PREV_TAG:-}"
+          if [ "${USE_PREV:-false}" = "true" ] && [ -d previous_model ] && [ -f previous_model/config.json ]; then
+            echo "✅ previous_model 准备就绪,内容如下:"
+            ls -lh previous_model/ | head -20
+            # 打印 base model type 验证是 HF 完整模型
+            python -c "import json; cfg=json.load(open('previous_model/config.json')); print('model_type=', cfg.get('model_type')); print('arch=', cfg.get('architectures'))"
+          else
+            echo "⚠️ previous_model 不可用,本次从 base 模型开始"
+          fi
+
       # ---------- 7. 跑微调 ----------
       - name: Run MLM fine-tuning
         env:
@@ -186,7 +268,12 @@ jobs:
           TOKENIZERS_PARALLELISM: 'false'
         run: |
           set -euo pipefail
-          MODEL_NAME="${{ github.event.inputs.model_name || 'hfl/chinese-macbert-base' }}"
+          if [ "${USE_PREV:-false}" = "true" ] && [ -d previous_model ] && [ -f previous_model/config.json ]; then
+            echo ">>>>> 使用上一个 release 的模型作为起点: previous_model/"
+            MODEL_NAME="previous_model"
+          else
+            MODEL_NAME="${{ github.event.inputs.model_name || 'hfl/chinese-macbert-base' }}"
+          fi
           EPOCHS="${{ github.event.inputs.epochs || '3' }}"
           BATCH_SIZE="${{ github.event.inputs.batch_size || '16' }}"
           USE_LORA="${{ github.event.inputs.use_lora }}"
@@ -233,7 +320,12 @@ jobs:
           TOKENIZERS_PARALLELISM: 'false'
         run: |
           set -euo pipefail
-          MODEL_NAME="${{ github.event.inputs.model_name || 'hfl/chinese-macbert-base' }}"
+          if [ "${USE_PREV:-false}" = "true" ] && [ -d previous_model ] && [ -f previous_model/config.json ]; then
+            echo ">>>>> 评估 base = previous_model (上一个 release 的模型)"
+            MODEL_NAME="previous_model"
+          else
+            MODEL_NAME="${{ github.event.inputs.model_name || 'hfl/chinese-macbert-base' }}"
+          fi
           SKIP_BASE="${{ github.event.inputs.skip_base_eval }}"
 
           EXTRA=()
@@ -318,6 +410,85 @@ jobs:
           path: logs/
           retention-days: 90
           if-no-files-found: warn
+
+      # ---------- 11.5 打包模型并发布为 GitHub Release ----------
+      - name: Package model and create GitHub Release
+        if: success() && github.event.inputs.auto_release == 'true'
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          set -euo pipefail
+          if [ ! -d output ]; then
+            echo "::error::output/ 不存在,无法打包"
+            exit 1
+          fi
+          cd output
+          # 把整个 output/ 打包成 model.zip(里面就是上一版本 HF 模型 + tokenizer + 训练日志 + 评估报告)
+          ZIP_NAME="${{ github.event.inputs.release_zip_name || 'model.zip' }}"
+          # 排除大体积的中间 checkpoint(若有)和 __pycache__
+          zip -r "../${ZIP_NAME}" . \
+            -x "checkpoint-*/*" "runs/*" "*.bin" "__pycache__/*" \
+            > /dev/null
+          cd ..
+          ls -lh "${ZIP_NAME}"
+          # 生成 release tag 和名字
+          TAG="daily-$(date -u +%Y%m%dT%H%M%SZ)"
+          NAME="Daily Fine-tune @ $(date -u +%Y-%m-%d %H:%M UTC)"
+          # 生成 release body(从训练/评估摘要 + 历史 release 链接)
+          BODY=$(python - <<'PY'
+          import json, os, datetime
+          ts = datetime.datetime.utcnow().strftime("%Y-%m-%d %H:%M UTC")
+          lines = [f"## Daily Fine-tune @ {ts}", ""]
+          try:
+              with open("output/training_log.json", "r", encoding="utf-8") as f:
+                  tr = json.load(f)
+              lines.append("### 训练")
+              lines.append(f"- mode: `{tr.get('mode')}`")
+              lines.append(f"- base: `{tr.get('model_name')}`")
+              lines.append(f"- epochs: {tr.get('epochs')}, bs: {tr.get('batch_size')}, lr: {tr.get('learning_rate')}")
+              lines.append(f"- 语料文件数: {tr.get('n_corpus_files')},样本数: {tr.get('n_samples')}")
+              lines.append(f"- 最终 loss: {tr.get('train_loss')}")
+              lines.append(f"- 训练耗时: {tr.get('train_runtime_sec')}s")
+          except Exception as e:
+              lines.append(f"_(训练日志读取失败:{e})_")
+          try:
+              with open("output/eval_report.json", "r", encoding="utf-8") as f:
+                  ev = json.load(f)
+              lines.append("")
+              lines.append("### 评估")
+              for who in ("base", "finetuned"):
+                  if who not in ev: continue
+                  x = ev[who]
+                  lines.append(f"- **{who}**: ppl={x.get('perplexity')}  top1={x.get('top1_acc')}  top5={x.get('top5_acc')}")
+              cmp_ = ev.get("comparison", {})
+              if cmp_ and "perplexity" in cmp_:
+                  c = cmp_["perplexity"]
+                  lines.append(f"- PPL 变化: {c.get('base')} → {c.get('ft')} (Δ {c.get('delta'):+.4f}, 优胜方: **{c.get('better')}**)")
+          except Exception as e:
+              lines.append(f"_(评估报告读取失败:{e})_")
+          # 上一个 release 链接
+          prev = os.environ.get("PREV_TAG")
+          if prev:
+              lines.append("")
+              lines.append(f"### 起点")
+              lines.append(f"- 本次基于上一个 release: `{prev}`")
+          lines.append("")
+          lines.append("### 附件")
+          lines.append(f"- `model.zip` — 完整 HF 模型 + tokenizer,直接 `transformers.AutoModelForMaskedLM.from_pretrained` 加载")
+          lines.append(f"- `eval_report.json` — PPL / top-k 准确率 / fill-mask 样例")
+          lines.append(f"- `training_log.json` — 训练指标 + MoMo/LoRA 参数")
+          print("\n".join(lines))
+          PY
+          )
+          echo ">>>>> 创建 release: ${TAG}"
+          echo "${BODY}" | gh release create "${TAG}" \
+            "${ZIP_NAME}" \
+            "output/eval_report.json" \
+            "output/training_log.json" \
+            --title "${NAME}" \
+            --notes "${BODY}" \
+            --target main
+          echo "<<<<< release ${TAG} created: https://github.com/${GITHUB_REPOSITORY}/releases/tag/${TAG}"
 
       # ---------- 12. commit 数据 / manifest / 日志 回到 main ----------
       - name: Commit data + logs back to main

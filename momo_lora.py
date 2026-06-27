@@ -70,6 +70,9 @@ class MoLoRALinear(nn.Module):
         self.router = nn.Linear(self.in_features, self.n_experts, bias=False)
         nn.init.normal_(self.router.weight, std=0.02)
 
+        # 可选:训练时加 noise(jitter),防止 router 早期坍缩到单 expert
+        self.router_noise = float(__import__("os").getenv("MOMO_ROUTER_NOISE", "0"))
+
         # 上次前向的辅助 loss(被 add_momo_aux_loss_hook 读取)
         self._last_aux_loss: torch.Tensor | None = None
 
@@ -80,6 +83,9 @@ class MoLoRALinear(nn.Module):
 
         # 路由
         router_logits = self.router(x)                            # [..., n_experts]
+        # 训练时加 Gaussian noise(jitter),与 top-k 路由配合
+        if self.training and self.router_noise > 0:
+            router_logits = router_logits + torch.randn_like(router_logits) * self.router_noise
         top_logits, top_idx = router_logits.topk(self.top_k, dim=-1)  # [..., k]
         top_probs = F.softmax(top_logits, dim=-1)                 # [..., k]
 
@@ -120,9 +126,8 @@ class MoLoRALinear(nn.Module):
             top1_idx = router_logits.argmax(dim=-1)             # [...]
             flat_idx = top1_idx.reshape(-1)
             n_tokens = flat_idx.numel()
-            f = torch.zeros(self.n_experts, device=router_logits.device, dtype=torch.float32)
-            for i in range(self.n_experts):
-                f[i] = (flat_idx == i).float().sum() / max(n_tokens, 1)
+            # 用 bincount 一次性统计每个 expert 被路由的次数(比 Python 循环快得多)
+            f = torch.bincount(flat_idx, minlength=self.n_experts).to(torch.float32) / max(n_tokens, 1)
         P = F.softmax(router_logits.float(), dim=-1)
         # 对所有非 expert 维求平均
         P = P.mean(dim=tuple(range(P.dim() - 1)))               # [n_experts]
@@ -292,3 +297,44 @@ def load_momo_checkpoint(model: nn.Module, adapter_dir: str,
             n_loaded += 1
     print(f"[INFO] MoLoRA loaded {n_loaded}/{len(state)} tensors from {sf_path}")
     return n_loaded
+
+
+def merge_momo_into_base(model: nn.Module) -> nn.Module:
+    """
+    就地把模型中所有 MoLoRALinear 用「专家均匀加权」的方式合并回 base。
+    修改完成后,模型中所有 MoLoRALinear 被替换为普通 nn.Linear,不需要 deepcopy。
+    返回原模型(已就地修改)。
+
+    注:这是一种近似 —— 等价于 router 输出均匀分布时的合并。
+    对于 cron 这种「能跑就行」的场景足够;严格意义上,真实合并应跑一轮
+    inference 拿 router 真实分布再加权。
+    """
+    n_merged = 0
+    for name, module in list(model.named_modules()):
+        if not isinstance(module, MoLoRALinear):
+            continue
+        # 累计每个 expert 的 LoRA 贡献(均匀加权)
+        device = module.base.weight.device
+        dtype = module.base.weight.dtype
+        lora_contrib = module.lora_B[0] @ module.lora_A[0] * module.scaling
+        for i in range(1, module.n_experts):
+            lora_contrib = lora_contrib + (module.lora_B[i] @ module.lora_A[i] * module.scaling)
+        lora_contrib = lora_contrib / module.n_experts  # 均匀加权
+
+        new_weight = module.base.weight.data + lora_contrib.to(device=device, dtype=dtype)
+        new_linear = nn.Linear(module.in_features, module.out_features,
+                               bias=module.base.bias is not None).to(device=device, dtype=dtype)
+        new_linear.weight.data = new_weight
+        if module.base.bias is not None:
+            new_linear.bias.data = module.base.bias.data.clone()
+
+        # 就地替换模块
+        parent_name, _, child_name = name.rpartition('.')
+        if parent_name:
+            parent = model.get_submodule(parent_name)
+        else:
+            parent = model
+        setattr(parent, child_name, new_linear)
+        n_merged += 1
+    print(f"[INFO] merge_momo_into_base:合并了 {n_merged} 个 MoLoRALinear(均匀近似,就地修改)")
+    return model

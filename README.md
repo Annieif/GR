@@ -7,6 +7,11 @@
 
 ## ✨ 项目目标
 
+![Daily Fine-tune](https://img.shields.io/badge/daily-fine--tune-blueviolet?style=flat-square)
+![Model](https://img.shields.io/badge/model-MacBERT--base-orange?style=flat-square)
+![LoRA+MoE](https://img.shields.io/badge/LoRA%2BMoE-yes-success?style=flat-square)
+![License](https://img.shields.io/badge/license-MIT-green?style=flat-square)
+
 - 每天 0 点(北京时间)自动在 GitHub 云端跑一次模型微调
 - 训练后**自动评估** base 与微调后模型,产出 PPL / top-k 准确率
 - 支持 **全参微调** / **PEFT LoRA** / **MoE+Multi-LoRA** 三种模式
@@ -81,6 +86,9 @@ GR/
 | `skip_base_eval` | `false` | 跳过 base 评估(加速) |
 | `push_to_hub` | **`false`** | 推送到 HF Hub(需 HF_TOKEN secret) |
 | `hub_repo_id` | 空 | HF Hub 仓库名 |
+| `use_previous_model` | **`true`** | 从上一个 Release 下载上次微调后的完整模型作为本次起点(实现跨日累积微调) |
+| `auto_release` | **`true`** | 本次跑完后自动创建 GitHub Release(包含 `model.zip` + 评估/训练日志) |
+| `release_zip_name` | `model.zip` | Release 附件 zip 文件名 |
 
 ### 3. 三种训练模式
 
@@ -188,6 +196,199 @@ m = AutoModelForMaskedLM.from_pretrained("path/to/unzipped/output")
 t = AutoTokenizer.from_pretrained("path/to/unzipped/output")
 ```
 
+## 📦 Release 与跨日累积微调
+
+每次成功的运行会自动创建一个 **GitHub Release**,把当前微调后的完整模型打包为 `model.zip`。
+下一次运行默认从最新的 release 拉取 `model.zip` 作为新起点,实现**跨日累积微调**。
+
+### Release 内容
+
+每次 release 的 tag 形如 `daily-20260627T020000Z`,包含:
+
+- **`model.zip`** — 完整 HF 模型 + tokenizer + 训练日志 + 评估报告,解压后可直接 `AutoModelForMaskedLM.from_pretrained` 加载
+- **`eval_report.json`** — PPL / top-k 准确率 / fill-mask 样例
+- **`training_log.json`** — 训练指标 + MoMo/LoRA 参数
+
+Release body 包含训练摘要(模式、base、loss、耗时)、评估对比(base vs ft 的 PPL/准确率)、以及「本次基于哪个 release」。
+
+### 跨日累积微调流程
+
+1. **本次运行**(假设是第 1 天)
+   - 从 `hfl/chinese-macbert-base` 开始微调
+   - 训练 + 评估后打包 `output/` 为 `model.zip`
+   - 创建 release `daily-20260627T020000Z`
+
+2. **下次运行**(第 2 天)
+   - workflow 启动后,`use_previous_model=true` 触发
+   - 找到最新 release `daily-20260627T020000Z`,下载 `model.zip`
+   - 解压到 `previous_model/`,作为本次 `--model_name`
+   - 在第 1 天的模型基础上继续微调
+   - 评估时,`--base_model` 也指向 `previous_model/`,即对比「昨天的模型 vs 今天的模型」
+   - 创建 release `daily-20260628T020000Z`
+
+3. **第 3 天、第 4 天**...依此类推,模型在每天的新数据上微调,效果逐步累积。
+
+### 跳过累积 / 强制从 base 重来
+
+手动触发时把 `use_previous_model` 设为 `false` 即可。模型会从 `model_name`(默认 `hfl/chinese-macbert-base`)开始。
+
+### 手动下载并继续训练
+
+```python
+from transformers import AutoModelForMaskedLM, AutoTokenizer
+
+# 1. 去 Releases 页下载最新 model.zip 并解压
+model = AutoModelForMaskedLM.from_pretrained("path/to/model")
+tokenizer = AutoTokenizer.from_pretrained("path/to/model")
+
+# 2. 用你喜欢的训练代码继续微调 ...
+```
+
+## 🔧 常见问题 / Troubleshooting
+
+### Q1: workflow 跑失败,日志说 "全部 N 次尝试都失败"
+
+`data/fetch_random_data.py` 跑完了 `max_attempts` 个候选数据集,全部都加载/抽取失败。
+
+**排查**:
+1. 打开 Actions 日志,看每个候选的 `✓/✗` 标记
+2. 去 `data/validate_dataset_pool.log`(如果存在)看每个候选的具体错误
+3. 修 `data/dataset_pool.json`:把不存在的删掉,或换 `text_fields` / `config`
+
+### Q2: 评估报 OOM / CUDA OOM
+
+`chinese-macbert-base` ~400MB,7GB runner 单卡能跑,但全参 + 大 batch 可能 OOM。
+
+**缓解**:
+- 把 `batch_size` 从 16 调到 8 或 4
+- 把 `max_len` 从 128 调到 64
+- 用 `use_momo=true`(只训 ~2.4MB LoRA 专家)或 `use_lora=true`(~10MB)
+- 评估时 `--batch_size 4`
+
+### Q3: 找不到 release / `previous_model` 解压后无 `config.json`
+
+第一次跑没有 release,正常(会从 base 模型开始)。后续跑如果 `previous_model/config.json` 缺失:
+
+**原因**:
+- 早期 release 的 `model.zip` 内容不对(比如只有 adapter 目录)
+- 手动删过 release
+
+**修复**:
+- 把 `use_previous_model` 临时设为 `false` 跑一次,生成完整 release
+- 或去 Releases 页确认最新 release 包含 `model.zip` 而不是只附件其他文件
+
+### Q4: GitHub release 创建失败 "Validation Failed: tag already exists"
+
+cron 同一分钟内触发了两次(理论上 `concurrency` 已防,极端情况下还会撞)。
+
+**修复**:
+- 删掉重复的 release 草稿
+- `concurrency.cancel-in-progress: false` 改为 `true` 让新 run 取消旧 run
+
+### Q5: 训练 loss 不下降 / NaN
+
+- 数据太短/太脏:打开 `data/extra_corpora/`,看新数据集的样本质量
+- 改小 `lr`(默认 5e-5):尝试 1e-5
+- 关掉 MoMo 试试:用 `use_momo=false` 全参或 `use_lora=true`
+
+### Q6: cron 没有触发
+
+GitHub Actions 的 schedule 有时延(尤其在仓库一段时间没活动后),cron 会被推迟直到下一次 commit。
+
+**检查**:Actions 页面的"Inactive schedules"会标记。
+
+### Q7: 想停掉累积,从头来
+
+1. 去 Releases 页 → Delete all releases
+2. 把 `data/used_datasets.json` 改成 `{"used": [], "history": []}`(可选,只是清空数据集使用记录)
+3. 手动触发 workflow,把 `use_previous_model` 设为 `false`
+
+## ⚡ 性能调优建议
+
+### 默认配置(已足够日常实验)
+
+- `epochs=3` · `batch_size=16` · `max_len=128` · `lr=5e-5`
+- MoMo: 4 experts · top-2 · r=8
+- 单次完整 run(数据 + 训练 + 评估 + 打包) ~12-15 分钟(GitHub 免费 runner)
+
+### 加速方案(按收益排序)
+
+1. **跳 base 评估**:`skip_base_eval=true` 省 4-5 分钟
+2. **缩 max_len**:从 128 调到 64,训练 token 数减半
+3. **少 epochs**:从 3 调到 1,适合快速试数据效果
+4. **用 MoMo 而不是全参**:训练参数量从 400M 降到 ~2.4M,迭代快 5-10x
+5. **不拉新数据**:`fetch_random_data=false`,只复训已有语料
+
+### 资源 / 成本估算
+
+| 配置 | 训练时间 | 磁盘占用(release) | 内存峰值 |
+| --- | --- | --- | --- |
+| 全参 + base=macbert-base | ~10 分钟 | ~400MB(model.safetensors) | ~3GB |
+| PEFT-LoRA (merge) | ~8 分钟 | ~400MB(merged) | ~2.5GB |
+| MoMo (合并到 base) | ~8 分钟 | ~400MB(merged) | ~2.5GB |
+| MoMo (只存 adapter) | ~8 分钟 | ~15MB(adapter) | ~2.5GB |
+
+> GitHub 免费账户每月 2000 分钟,够跑 ~100 次完整 run。
+
+### 训练质量调优
+
+- **数据量不够时**:把 `max_random_samples` 从 500 调到 1000-2000
+- **想学路由 / 多任务**:`momo_n_experts=8` + `momo_top_k=2`,路由更细
+- **想稳定训练**:`momo_aux_alpha=0.1`(更大),防 router 坍缩
+- **router 不收敛**:设环境变量 `MOMO_ROUTER_NOISE=0.1`,给路由 logits 加高斯噪声
+
+## 🧹 清理与重置
+
+### 清空累积的数据集(下次再从候选池抽)
+
+```bash
+# 保留 used_datasets.json 结构,只清空 used / history
+echo '{"used": [], "history": []}' > data/used_datasets.json
+rm -rf data/extra_corpora/*   # 可选:删掉已下载的语料,下次会重下
+```
+
+### 删掉所有 release(下次从 base 重来)
+
+在 GitHub 网页 → Releases → Delete all releases(手动)。
+
+或用 gh CLI:
+```bash
+gh release delete --yes $(gh release list --json tagName -q '.[].tagName')
+```
+
+### 清空累积的日志
+
+```bash
+rm -rf logs/history/*
+```
+
+### 完全重置项目
+
+```bash
+# 删 output / 数据缓存 / 日志
+rm -rf output/ logs/ data/extra_corpora/* data/cache/
+# 删所有 release(见上)
+# commit:
+git add -A && git commit -m "chore: full reset"
+```
+
+### 只删某个数据集的语料(但保留 used 记录)
+
+不建议,会让 used manifest 失去对应文件;真要做就直接编辑 `data/used_datasets.json` 删掉对应 entry。
+
+## 🔄 自动更新候选池(可选)
+
+`data/dataset_pool.json` 写死了一组候选。**项目没有自动发现新数据集的机制**——
+这是有意为之,避免在 cron 中产生不可预测的网络依赖。
+
+如果想扩充,手动编辑 `data/dataset_pool.json` 加上新条目,然后跑:
+
+```bash
+python data/fetch_random_data.py --validate_only
+```
+
+验证新条目存在且 schema 能抽到文本。
+
 ## 🧪 本地试跑(可选,需要 Python 3.10+)
 
 ```bash
@@ -216,7 +417,11 @@ python data/fetch_random_data.py --max_samples 100
 - **磁盘清理**:删 `dotnet` / `android` / `CodeQL`
 - **时间错峰**:cron `0 2 * * *`(UTC)
 - **数据自增长**:`data/extra_corpora/` + `data/used_datasets.json` 都被 commit,语料自然累积
+- **跨日累积微调**:每次跑完自动创建 GitHub Release,下次默认从上一个 Release 接着练
+- **Merged 完整模型优先**:`output/` 始终是合并后的完整 HF 模型,可直接加载、也可作为下一轮起点
 - **训练 + 评估 + 上传 + 提交** 一站式,失败也不会丢前面的日志
+- **previous_model 缓存**:跨 run 缓存上次的 `previous_model/`,配合 `restore-keys` 让 step 6.5 重新下载时不会完全冷启
+- **状态可视化**:step 6.6 在训练前打 `USE_PREV` / `PREV_TAG` / `model_type`,出问题时一眼看出「这次是基于昨天的模型还是 base」
 
 ## 📝 实验性
 

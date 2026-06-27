@@ -85,27 +85,67 @@ def load_eval_data(path: str):
 
 
 def load_model_any(path: str, tokenizer):
-    """统一加载 base / fine-tuned / LoRA adapter 三种形式。"""
-    adapter_subdir = Path(path) / "adapter"
-    if adapter_subdir.exists() and (adapter_subdir / "adapter_config.json").exists():
-        # ---- LoRA adapter 模式 ----
-        try:
-            from peft import PeftModel
-        except ImportError:
-            sys.exit("[ERROR] 检测到 LoRA adapter,但未安装 peft")
-        # base 从 adapter_config.json 读
-        with open(adapter_subdir / "adapter_config.json", "r", encoding="utf-8") as f:
+    """统一加载 base / fine-tuned / LoRA adapter / MoMo adapter 四种形式。
+
+    加载优先级:
+      1. path/config.json 存在 → 当作合并后的完整 HF 模型
+      2. path/adapter/adapter_config.json 存在 → 按 PEFT-LoRA / MoMo adapter 加载
+      3. 其它 → 直接当 HF 仓库路径
+    """
+    path = Path(path)
+    config_file = path / "config.json"
+    adapter_dir = path / "adapter"
+    adapter_cfg = adapter_dir / "adapter_config.json"
+
+    if config_file.exists():
+        # ---- 完整 HF 模型(可能是全参/PEFT-merged/MoMo-merged)----
+        print(f"[INFO] 加载完整模型: {path}")
+        model = AutoModelForMaskedLM.from_pretrained(str(path))
+    elif adapter_cfg.exists():
+        # ---- Adapter 模式(PEFT-LoRA 或 MoMo)----
+        with open(adapter_cfg, "r", encoding="utf-8") as f:
             cfg = json.load(f)
+        model_type = cfg.get("model_type", "peft")
         base_name = cfg.get("base_model_name_or_path")
         if not base_name:
             sys.exit("[ERROR] adapter_config.json 缺 base_model_name_or_path")
-        print(f"[INFO] LoRA 模式:base={base_name}, adapter={adapter_subdir}")
-        base_model = AutoModelForMaskedLM.from_pretrained(base_name)
-        model = PeftModel.from_pretrained(base_model, str(adapter_subdir))
-        model = model.merge_and_unload()  # 合并后做标准推理
+        if model_type == "momo_lora":
+            # MoMo adapter:重新注入 MoLoRALinear 结构,加载权重
+            try:
+                from momo_lora import (
+                    inject_momo_lora, load_momo_checkpoint, merge_momo_into_base,
+                )
+            except ImportError as e:
+                sys.exit(f"[ERROR] 加载 MoMo adapter 需要 momo_lora.py: {e}")
+            print(f"[INFO] MoMo 模式:base={base_name}, adapter={adapter_dir}")
+            base_model = AutoModelForMaskedLM.from_pretrained(base_name)
+            n = inject_momo_lora(
+                base_model,
+                target_module_names=cfg.get("target_module_names", ["query", "value"]),
+                n_experts=cfg.get("n_experts", 4),
+                top_k=cfg.get("top_k", 2),
+                lora_r=cfg.get("lora_r", 8),
+                lora_alpha=cfg.get("lora_alpha", 16),
+                lora_dropout=cfg.get("lora_dropout", 0.0),
+                aux_loss_alpha=cfg.get("aux_loss_alpha", 0.01),
+            )
+            if n == 0:
+                sys.exit(f"[ERROR] MoMo 注入了 0 层,target={cfg.get('target_module_names')}")
+            load_momo_checkpoint(base_model, str(adapter_dir))
+            model = merge_momo_into_base(base_model)
+        else:
+            # PEFT-LoRA adapter
+            try:
+                from peft import PeftModel
+            except ImportError:
+                sys.exit("[ERROR] 检测到 LoRA adapter,但未安装 peft")
+            print(f"[INFO] LoRA 模式:base={base_name}, adapter={adapter_dir}")
+            base_model = AutoModelForMaskedLM.from_pretrained(base_name)
+            model = PeftModel.from_pretrained(base_model, str(adapter_dir))
+            model = model.merge_and_unload()
     else:
         print(f"[INFO] 加载模型: {path}")
-        model = AutoModelForMaskedLM.from_pretrained(path)
+        model = AutoModelForMaskedLM.from_pretrained(str(path))
     model.eval()
     return model
 

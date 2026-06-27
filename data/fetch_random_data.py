@@ -254,9 +254,13 @@ def main() -> int:
             save_manifest(manifest)
             print(f"[INFO] 更新 {MANIFEST_PATH.relative_to(REPO_ROOT)} "
                   f"(已用 {len(manifest['used'])} 个)")
-            print(f"::set-output name=dataset_id::{entry['id']}")
-            print(f"::set-output name=n_samples::{n}")
-            print(f"::set-output name=out_path::{rel_path}")
+            # 写入 $GITHUB_OUTPUT(GitHub Actions 新版 set-output)
+            out_file = os.environ.get("GITHUB_OUTPUT")
+            if out_file:
+                with open(out_file, "a", encoding="utf-8") as gf:
+                    gf.write(f"dataset_id={entry['id']}\n")
+                    gf.write(f"n_samples={n}\n")
+                    gf.write(f"out_path={rel_path}\n")
             return 0
         except Exception as e:
             last_err = e
