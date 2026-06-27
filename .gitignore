@@ -19,6 +19,7 @@ models/
 
 # 日志
 logs/
+!logs/history/
 *.log
 
 # 数据集缓存

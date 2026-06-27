@@ -213,9 +213,9 @@ jobs:
           set -euo pipefail
           rm -rf previous_model
           echo ">>>>> 查找最新 release"
-          # 找最近一个含 model.zip 的 release(忽略无 model.zip 的早期 release)
+          # 找最近一个含 model.zip 的 release
           TAG=$(gh release list --limit 30 --json tagName,assets \
-                  --jq '.[] | select(.assets | length > 0) | .tagName' \
+                  --jq '.[] | select(.assets | map(.name) | contains(["model.zip"])) | .tagName' \
               | grep -E '^(daily|release)-' | head -n 1 || true)
           if [ -z "${TAG:-}" ]; then
             echo "::warning::未找到包含 model.zip 的历史 release,本次从 base 模型开始"
@@ -344,6 +344,7 @@ jobs:
             --eval_data data/eval.txt \
             --report_path output/eval_report.json \
             --batch_size 16 \
+            --max_eval_samples 500 \
             "${EXTRA[@]}"
           echo "<<<<< evaluation finished"
           python - <<'PY'
@@ -485,7 +486,7 @@ jobs:
           PY
           )
           echo ">>>>> 创建 release: ${TAG}"
-          echo "${BODY}" | gh release create "${TAG}" \
+          gh release create "${TAG}" \
             "${ZIP_NAME}" \
             "output/eval_report.json" \
             "output/training_log.json" \
@@ -515,7 +516,7 @@ jobs:
         if: |
           github.event_name == 'workflow_dispatch' &&
           github.event.inputs.push_to_hub == 'true' &&
-          env.HF_TOKEN != ''
+          secrets.HF_TOKEN != ''
         env:
           HF_TOKEN: ${{ secrets.HF_TOKEN }}
           HF_HUB_DISABLE_PROGRESS_BARS: '1'
