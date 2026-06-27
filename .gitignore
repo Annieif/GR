@@ -1,0 +1,35 @@
+# Python
+__pycache__/
+*.py[cod]
+*$py.class
+*.egg-info/
+.venv/
+venv/
+env/
+.pytest_cache/
+.mypy_cache/
+
+# 模型权重与产物
+output/
+models/
+*.bin
+*.safetensors
+*.pt
+*.pth
+
+# 日志
+logs/
+*.log
+
+# 数据集缓存
+data/cache/
+data/raw/
+
+# IDE
+.vscode/
+.idea/
+*.swp
+.DS_Store
+
+# 系统
+Thumbs.db

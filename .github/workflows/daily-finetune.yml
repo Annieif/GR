@@ -1,0 +1,197 @@
+name: Daily Chinese BERT Fine-tune
+
+on:
+  # 每天 UTC 02:00 触发(北京时间 10:00),错峰使用 runner
+  schedule:
+    - cron: '0 2 * * *'
+  # 支持手动触发,带参数
+  workflow_dispatch:
+    inputs:
+      model_name:
+        description: 'HuggingFace 上的 base 模型(纯 PyTorch)'
+        required: false
+        default: 'hfl/chinese-macbert-base'
+      epochs:
+        description: '训练轮数'
+        required: false
+        default: '3'
+      batch_size:
+        description: '每设备 batch size'
+        required: false
+        default: '16'
+      push_to_hub:
+        description: '是否推送到 HuggingFace Hub (需配置 HF_TOKEN secret)'
+        required: false
+        default: false
+        type: boolean
+      hub_repo_id:
+        description: 'HF Hub 仓库 ID,形如 username/repo-name'
+        required: false
+        default: ''
+
+# 防止旧 workflow 占用 runner
+concurrency:
+  group: daily-finetune
+  cancel-in-progress: false
+
+jobs:
+  finetune:
+    name: 每日中文 MLM 微调
+    runs-on: ubuntu-latest
+    timeout-minutes: 60
+    permissions:
+      contents: write   # 允许把日志推回 main
+      actions: read
+
+    steps:
+      # ---------- 0. 释放磁盘 ----------
+      - name: Free up disk space
+        run: |
+          echo "清理前:"
+          df -h /
+          sudo rm -rf /usr/share/dotnet /usr/local/lib/android /opt/ghc
+          sudo rm -rf "$AGENT_TOOLSDIRECTORY/CodeQL" 2>/dev/null || true
+          echo "清理后:"
+          df -h /
+
+      # ---------- 1. 拉取代码 ----------
+      - name: Checkout repository
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      # ---------- 2. 准备 Python ----------
+      - name: Setup Python 3.10
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.10'
+          cache: 'pip'
+
+      # ---------- 3. 缓存 HuggingFace 模型 ----------
+      # 后续每天都能复用下载好的 base 模型,极大加速
+      - name: Cache HuggingFace model & tokenizer
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cache/huggingface
+          key: hf-${{ runner.os }}-${{ hashFiles('requirements.txt') }}-${{ github.event.inputs.model_name || 'hfl/chinese-macbert-base' }}
+          restore-keys: |
+            hf-${{ runner.os }}-${{ hashFiles('requirements.txt') }}-
+            hf-${{ runner.os }}-
+
+      # ---------- 4. 安装依赖 ----------
+      - name: Install Python dependencies
+        run: |
+          python -m pip install --upgrade pip
+          pip install -r requirements.txt
+          echo "--- 关键版本 ---"
+          python -c "import torch, transformers, datasets; print(f'torch={torch.__version__}'); print(f'transformers={transformers.__version__}'); print(f'datasets={datasets.__version__}')"
+
+      # ---------- 5. 检查数据 ----------
+      - name: Verify training corpus
+        run: |
+          wc -l data/corpus.txt
+          head -3 data/corpus.txt
+
+      # ---------- 6. 跑微调 ----------
+      - name: Run MLM fine-tuning
+        env:
+          HF_TOKEN: ${{ secrets.HF_TOKEN }}
+          HF_HUB_DISABLE_PROGRESS_BARS: '1'
+          TRANSFORMERS_VERBOSITY: info
+          TOKENIZERS_PARALLELISM: 'false'
+        run: |
+          set -euo pipefail
+          MODEL_NAME="${{ github.event.inputs.model_name || 'hfl/chinese-macbert-base' }}"
+          EPOCHS="${{ github.event.inputs.epochs || '3' }}"
+          BATCH_SIZE="${{ github.event.inputs.batch_size || '16' }}"
+
+          echo ">>>>> start training: model=$MODEL_NAME epochs=$EPOCHS bs=$BATCH_SIZE"
+          python train.py \
+            --model_name "$MODEL_NAME" \
+            --data_path data/corpus.txt \
+            --output_dir output \
+            --epochs "$EPOCHS" \
+            --batch_size "$BATCH_SIZE" \
+            --lr 5e-5 \
+            --max_len 128 \
+            --seed 42
+          echo "<<<<< training finished"
+
+      # ---------- 7. 备份训练日志 ----------
+      - name: Archive training log
+        if: always()
+        run: |
+          mkdir -p logs/history
+          ts=$(date -u +%Y%m%d_%H%M%S)
+          if [ -f output/training_log.json ]; then
+            cp output/training_log.json "logs/history/${ts}_training_log.json"
+            echo "Saved logs/history/${ts}_training_log.json"
+          fi
+
+      # ---------- 8. 上传模型为 artifact ----------
+      - name: Upload fine-tuned model
+        if: success()
+        uses: actions/upload-artifact@v4
+        with:
+          name: finetuned-model-${{ github.run_id }}
+          path: output/
+          retention-days: 30
+          if-no-files-found: warn
+
+      # ---------- 9. 上传训练日志为 artifact ----------
+      - name: Upload training logs
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: training-logs-${{ github.run_id }}
+          path: logs/
+          retention-days: 90
+          if-no-files-found: warn
+
+      # ---------- 10. 把日志 commit 回仓库 ----------
+      - name: Commit training log back to main
+        if: always()
+        run: |
+          git config user.name  "github-actions[bot]"
+          git config user.email "github-actions[bot]@users.noreply.github.com"
+          git add logs/history/ || true
+          if git diff --cached --quiet; then
+            echo "No log changes to commit."
+          else
+            git commit -m "chore(training): log @ $(date -u +%FT%TZ)"
+            git push
+            echo "Pushed log to main."
+          fi
+
+      # ---------- 11. 可选:推送到 HuggingFace Hub ----------
+      - name: Push to HuggingFace Hub
+        if: |
+          github.event_name == 'workflow_dispatch' &&
+          github.event.inputs.push_to_hub == 'true' &&
+          env.HF_TOKEN != ''
+        env:
+          HF_TOKEN: ${{ secrets.HF_TOKEN }}
+          HF_HUB_DISABLE_PROGRESS_BARS: '1'
+        run: |
+          set -euo pipefail
+          HUB_REPO="${{ github.event.inputs.hub_repo_id }}"
+          if [ -z "$HUB_REPO" ]; then
+            echo "::error::hub_repo_id 未填,无法推送"
+            exit 1
+          fi
+          python - <<PY
+          import os
+          from huggingface_hub import HfApi, create_repo
+          token = os.environ['HF_TOKEN']
+          repo_id = "$HUB_REPO"
+          api = HfApi(token=token)
+          create_repo(repo_id, token=token, exist_ok=True, repo_type='model', private=False)
+          api.upload_folder(
+              folder_path='./output',
+              repo_id=repo_id,
+              repo_type='model',
+              commit_message='Daily fine-tune @ ' + os.popen('date -u +%FT%TZ').read().strip(),
+          )
+          print(f'Pushed to https://huggingface.co/{repo_id}')
+          PY
