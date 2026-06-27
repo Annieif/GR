@@ -293,10 +293,12 @@ def main() -> None:
 
     base_res = None
     if not args.skip_base:
-        base_res = evaluate_one("BASE", args.base_model, tokenizer, eval_ds, args)
+        base_res = evaluate_one("BASE", args.base_model, tokenizer, eval_ds, args,
+                                base_model_name=args.base_model)
         results["base"] = base_res
 
-    ft_res = evaluate_one("FINETUNED", args.ft_model, tokenizer, eval_ds, args)
+    ft_res = evaluate_one("FINETUNED", args.ft_model, tokenizer, eval_ds, args,
+                          base_model_name=args.base_model)
     results["finetuned"] = ft_res
 
     results["comparison"] = make_comparison(base_res, ft_res)

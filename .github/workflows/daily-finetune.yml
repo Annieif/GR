@@ -1,4 +1,4 @@
-name: Daily Chinese BERT Fine-tune + Evaluate
+name: Daily Chinese BERT Fine-tune + Evaluate (with MoE+Multi-LoRA)
 
 on:
   # 每天 UTC 02:00 触发(北京时间 10:00),错峰使用 runner
@@ -20,27 +20,65 @@ on:
         required: false
         default: '16'
       use_lora:
-        description: '启用 LoRA(PEFT)微调,节省显存/磁盘'
+        description: '启用 PEFT LoRA 微调'
         required: false
         default: false
         type: boolean
       lora_r:
-        description: 'LoRA 秩(仅在 use_lora=true 时生效)'
+        description: 'PEFT LoRA 秩'
         required: false
         default: '8'
       lora_alpha:
-        description: 'LoRA alpha(仅在 use_lora=true 时生效)'
+        description: 'PEFT LoRA alpha'
         required: false
         default: '16'
       lora_dropout:
-        description: 'LoRA dropout(仅在 use_lora=true 时生效)'
+        description: 'PEFT LoRA dropout'
         required: false
         default: '0.1'
       merge_lora:
-        description: '训练后把 LoRA 合并回 base 并保存(evaluate.py 无需感知 LoRA)'
+        description: '训练后把 LoRA 合并回 base 并保存'
         required: false
         default: true
         type: boolean
+      use_momo:
+        description: '启用 MoE + Multi-LoRA(自定义 momo_lora.py)'
+        required: false
+        default: false
+        type: boolean
+      momo_n_experts:
+        description: 'MoMo 专家数(仅在 use_momo=true 时生效)'
+        required: false
+        default: '4'
+      momo_top_k:
+        description: 'MoMo top-k 路由'
+        required: false
+        default: '2'
+      momo_lora_r:
+        description: 'MoMo 单个 LoRA expert 的秩'
+        required: false
+        default: '8'
+      momo_lora_alpha:
+        description: 'MoMo LoRA alpha'
+        required: false
+        default: '16'
+      momo_target:
+        description: 'MoMo 注入目标模块,逗号分隔(默认 query,value)'
+        required: false
+        default: 'query,value'
+      momo_aux_alpha:
+        description: 'MoMo 负载均衡 loss 系数'
+        required: false
+        default: '0.01'
+      fetch_random_data:
+        description: '本次运行是否拉取一个随机新数据集'
+        required: false
+        default: true
+        type: boolean
+      max_random_samples:
+        description: '随机拉取的数据集最多取多少条'
+        required: false
+        default: '300'
       skip_base_eval:
         description: '跳过 base 模型评估(只评微调后,加速)'
         required: false
@@ -63,7 +101,7 @@ concurrency:
 
 jobs:
   finetune:
-    name: 每日中文 MLM 微调 + 评估
+    name: 每日中文 MLM 微调 + 评估(MoE+Multi-LoRA)
     runs-on: ubuntu-latest
     timeout-minutes: 60
     permissions:
@@ -95,7 +133,6 @@ jobs:
           cache: 'pip'
 
       # ---------- 3. 缓存 HuggingFace 模型 ----------
-      # 后续每天都能复用下载好的 base 模型,极大加速
       - name: Cache HuggingFace model & tokenizer
         uses: actions/cache@v4
         with:
@@ -117,10 +154,30 @@ jobs:
       # ---------- 5. 检查数据 ----------
       - name: Verify corpora
         run: |
-          wc -l data/corpus.txt
-          wc -l data/eval.txt
+          echo "--- 主语料 ---"; wc -l data/corpus.txt
+          echo "--- 评估语料 ---"; wc -l data/eval.txt
+          echo "--- 历史 extra corpora ---"; ls -la data/extra_corpora/ 2>/dev/null || echo "(无)"
+          echo "--- 候选池大小 ---"; python -c "import json; print(len(json.load(open('data/dataset_pool.json'))))"
+          echo "--- 已用 ---"; cat data/used_datasets.json
 
-      # ---------- 6. 跑微调 ----------
+      # ---------- 6. 拉取一个随机新数据集 ----------
+      - name: Fetch random Chinese dataset
+        if: github.event.inputs.fetch_random_data == 'true'
+        env:
+          HF_TOKEN: ${{ secrets.HF_TOKEN }}
+          HF_HUB_DISABLE_PROGRESS_BARS: '1'
+        run: |
+          set -euo pipefail
+          MAX="${{ github.event.inputs.max_random_samples || '300' }}"
+          echo ">>>>> fetching a random dataset (max_samples=$MAX)"
+          python data/fetch_random_data.py --max_samples "$MAX" --max_attempts 4
+          echo "<<<<< fetch finished"
+          echo "--- 拉取后状态 ---"
+          cat data/used_datasets.json
+          echo "--- 新增文件 ---"
+          ls -la data/extra_corpora/ | tail -5
+
+      # ---------- 7. 跑微调 ----------
       - name: Run MLM fine-tuning
         env:
           HF_TOKEN: ${{ secrets.HF_TOKEN }}
@@ -133,23 +190,33 @@ jobs:
           EPOCHS="${{ github.event.inputs.epochs || '3' }}"
           BATCH_SIZE="${{ github.event.inputs.batch_size || '16' }}"
           USE_LORA="${{ github.event.inputs.use_lora }}"
-          LORA_R="${{ github.event.inputs.lora_r || '8' }}"
-          LORA_ALPHA="${{ github.event.inputs.lora_alpha || '16' }}"
-          LORA_DROPOUT="${{ github.event.inputs.lora_dropout || '0.1' }}"
-          MERGE_LORA="${{ github.event.inputs.merge_lora }}"
+          USE_MOMO="${{ github.event.inputs.use_momo }}"
 
-          echo ">>>>> start training: model=$MODEL_NAME epochs=$EPOCHS bs=$BATCH_SIZE lora=$USE_LORA"
           EXTRA=()
           if [ "$USE_LORA" = "true" ]; then
-            EXTRA+=(--use_lora --lora_r "$LORA_R" --lora_alpha "$LORA_ALPHA" --lora_dropout "$LORA_DROPOUT")
-            if [ "$MERGE_LORA" = "true" ]; then
+            EXTRA+=(--use_lora
+                    --lora_r "${{ github.event.inputs.lora_r || '8' }}"
+                    --lora_alpha "${{ github.event.inputs.lora_alpha || '16' }}"
+                    --lora_dropout "${{ github.event.inputs.lora_dropout || '0.1' }}")
+            if [ "${{ github.event.inputs.merge_lora }}" = "true" ]; then
               EXTRA+=(--merge_lora)
             fi
           fi
+          if [ "$USE_MOMO" = "true" ]; then
+            EXTRA+=(--use_momo
+                    --momo_n_experts "${{ github.event.inputs.momo_n_experts || '4' }}"
+                    --momo_top_k "${{ github.event.inputs.momo_top_k || '2' }}"
+                    --momo_lora_r "${{ github.event.inputs.momo_lora_r || '8' }}"
+                    --momo_lora_alpha "${{ github.event.inputs.momo_lora_alpha || '16' }}"
+                    --momo_target "${{ github.event.inputs.momo_target || 'query,value' }}"
+                    --momo_aux_alpha "${{ github.event.inputs.momo_aux_alpha || '0.01' }}")
+          fi
 
+          echo ">>>>> start training: model=$MODEL_NAME epochs=$EPOCHS bs=$BATCH_SIZE lora=$USE_LORA momo=$USE_MOMO"
           python train.py \
             --model_name "$MODEL_NAME" \
             --data_path data/corpus.txt \
+            --extra_corpus_dir data/extra_corpora \
             --output_dir output \
             --epochs "$EPOCHS" \
             --batch_size "$BATCH_SIZE" \
@@ -159,7 +226,7 @@ jobs:
             "${EXTRA[@]}"
           echo "<<<<< training finished"
 
-      # ---------- 7. 评估 base + 微调后模型 ----------
+      # ---------- 8. 评估 ----------
       - name: Run evaluation
         env:
           HF_HUB_DISABLE_PROGRESS_BARS: '1'
@@ -183,7 +250,6 @@ jobs:
             --batch_size 16 \
             "${EXTRA[@]}"
           echo "<<<<< evaluation finished"
-          # 打印 eval 摘要
           python - <<'PY'
           import json
           with open("output/eval_report.json", "r", encoding="utf-8") as f:
@@ -199,7 +265,7 @@ jobs:
                   print(f"  Δ ppl: {c.get('base')} -> {c.get('ft')}  ({c.get('delta'):+.4f}, better={c.get('better')})")
           PY
 
-      # ---------- 8. 备份训练日志和评估报告 ----------
+      # ---------- 9. 备份训练/评估日志 ----------
       - name: Archive training & eval logs
         if: always()
         run: |
@@ -207,7 +273,6 @@ jobs:
           ts=$(date -u +%Y%m%d_%H%M%S)
           [ -f output/training_log.json ] && cp output/training_log.json "logs/history/${ts}_training_log.json"
           [ -f output/eval_report.json ]   && cp output/eval_report.json   "logs/history/${ts}_eval_report.json"
-          # 再写一个一行摘要,便于 git diff 看每天趋势
           python - <<'PY'
           import json, os, datetime
           ts = datetime.datetime.utcnow().strftime("%Y%m%d_%H%M%S")
@@ -219,7 +284,10 @@ jobs:
                   if name == "train":
                       summary["train_loss"] = d.get("train_loss")
                       summary["train_runtime_sec"] = d.get("train_runtime_sec")
-                      summary["use_lora"] = d.get("use_lora", False)
+                      summary["mode"] = d.get("mode")
+                      summary["use_momo"] = d.get("use_momo", False)
+                      summary["n_corpus_files"] = d.get("n_corpus_files")
+                      summary["n_samples"] = d.get("n_samples")
                   else:
                       summary["ppl_base"]   = d.get("base", {}).get("perplexity")
                       summary["ppl_ft"]     = d.get("finetuned", {}).get("perplexity")
@@ -231,7 +299,7 @@ jobs:
           print("Wrote", out)
           PY
 
-      # ---------- 9. 上传模型为 artifact ----------
+      # ---------- 10. 上传模型为 artifact ----------
       - name: Upload fine-tuned model
         if: success()
         uses: actions/upload-artifact@v4
@@ -241,7 +309,7 @@ jobs:
           retention-days: 30
           if-no-files-found: warn
 
-      # ---------- 10. 上传日志为 artifact ----------
+      # ---------- 11. 上传日志为 artifact ----------
       - name: Upload training & eval logs
         if: always()
         uses: actions/upload-artifact@v4
@@ -251,22 +319,23 @@ jobs:
           retention-days: 90
           if-no-files-found: warn
 
-      # ---------- 11. 把日志 commit 回仓库 ----------
-      - name: Commit logs back to main
+      # ---------- 12. commit 数据 / manifest / 日志 回到 main ----------
+      - name: Commit data + logs back to main
         if: always()
         run: |
           git config user.name  "github-actions[bot]"
           git config user.email "github-actions[bot]@users.noreply.github.com"
-          git add logs/history/ || true
+          # 拉取的新数据 + manifest + 日志一起 commit
+          git add data/extra_corpora/ data/used_datasets.json logs/history/ 2>/dev/null || true
           if git diff --cached --quiet; then
-            echo "No log changes to commit."
+            echo "No changes to commit."
           else
             git commit -m "chore(training+eval): log @ $(date -u +%FT%TZ)"
             git push
-            echo "Pushed logs to main."
+            echo "Pushed data + logs to main."
           fi
 
-      # ---------- 12. 可选:推送到 HuggingFace Hub ----------
+      # ---------- 13. 可选:推送到 HuggingFace Hub ----------
       - name: Push to HuggingFace Hub
         if: |
           github.event_name == 'workflow_dispatch' &&

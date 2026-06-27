@@ -1,20 +1,25 @@
 """
-每日中文 BERT 微调脚本(支持可选 LoRA)
-----------------------------------------
+每日中文 BERT 微调脚本(支持 全参 / LoRA / MoE+Multi-LoRA)
+----------------------------------------------------------------
 - 默认 base 模型: hfl/chinese-macbert-base  (纯 PyTorch, ~400MB, 中文原生)
 - 任务: Masked Language Modeling(掩码语言建模)
-- 训练语料: data/corpus.txt  (一行一句,UTF-8 纯中文文本)
-- 输出:  ./output/  (含 model + tokenizer + 训练日志)
-- 可选:  --use_lora 走 PEFT LoRA 路线,显存/磁盘更省,便于频繁日训
+- 训练语料: data/corpus.txt + (可选) data/extra_corpora/*.txt
+- 输出:  ./output/
+  * 全参: model.safetensors + tokenizer
+  * LoRA(merge): 完整模型(便于 evaluate.py 直接用)
+  * LoRA(no-merge): output/adapter/  (PEFT adapter)
+  * MoMo:        output/adapter/  (safetensors + adapter_config.json)
 
 使用:
-  python train.py                                  # 全参微调 macbert-base
-  python train.py --use_lora                      # LoRA 微调(默认参数)
-  python train.py --use_lora --lora_r 16 --epochs 5
+  python train.py                                    # 全参微调
+  python train.py --use_lora --merge_lora            # LoRA 微调并合并
+  python train.py --use_momo                         # MoE + Multi-LoRA
+  python train.py --use_momo --momo_n_experts 8 --momo_top_k 2
 """
 from __future__ import annotations
 
 import argparse
+import glob
 import json
 import os
 import random
@@ -34,13 +39,24 @@ from transformers import (
     set_seed,
 )
 
+# 本地 MoMo 模块
+sys.path.insert(0, str(Path(__file__).resolve().parent))
+from momo_lora import (  # noqa: E402
+    add_momo_aux_loss_hook,
+    get_momo_param_count,
+    inject_momo_lora,
+    save_momo_checkpoint,
+)
+
 
 def parse_args() -> argparse.Namespace:
-    p = argparse.ArgumentParser(description="每日中文 MLM 微调(支持 LoRA)")
+    p = argparse.ArgumentParser(description="每日中文 MLM 微调(支持全参/LoRA/MoMo)")
     p.add_argument("--model_name", default="hfl/chinese-macbert-base",
                    help="HuggingFace 上的 base 模型(纯 PyTorch)")
     p.add_argument("--data_path", default="data/corpus.txt",
-                   help="训练语料,一行一句 UTF-8 文本")
+                   help="主训练语料,一行一句 UTF-8 文本")
+    p.add_argument("--extra_corpus_dir", default="data/extra_corpora",
+                   help="额外语料目录(可选),目录下所有 .txt 都会被读入")
     p.add_argument("--output_dir", default="output",
                    help="微调后模型输出目录")
     p.add_argument("--epochs", type=int, default=3)
@@ -55,29 +71,62 @@ def parse_args() -> argparse.Namespace:
     p.add_argument("--log_steps", type=int, default=20)
     p.add_argument("--save_total_limit", type=int, default=1)
 
-    # ---- LoRA 参数 ----
+    # ---- PEFT LoRA ----
     p.add_argument("--use_lora", action="store_true",
-                   help="启用 LoRA(PEFT),只训练低秩适配器,节省资源")
-    p.add_argument("--lora_r", type=int, default=8, help="LoRA 秩")
-    p.add_argument("--lora_alpha", type=int, default=16, help="LoRA alpha")
-    p.add_argument("--lora_dropout", type=float, default=0.1, help="LoRA dropout")
-    p.add_argument("--lora_target", default="query,key,value",
-                   help="LoRA 注入的目标模块名,逗号分隔")
+                   help="启用 PEFT LoRA(单 adapter)")
+    p.add_argument("--lora_r", type=int, default=8)
+    p.add_argument("--lora_alpha", type=int, default=16)
+    p.add_argument("--lora_dropout", type=float, default=0.1)
+    p.add_argument("--lora_target", default="query,key,value")
     p.add_argument("--merge_lora", action="store_true",
-                   help="训练完成后将 LoRA 合并进 base,保存为完整模型 "
-                        "(evaluate.py 不用感知 LoRA)")
+                   help="训练完成后把 LoRA 合并进 base,保存为完整模型")
+
+    # ---- MoE + Multi-LoRA(MoMo) ----
+    p.add_argument("--use_momo", action="store_true",
+                   help="启用 MoE + Multi-LoRA(自定义 momo_lora 模块)")
+    p.add_argument("--momo_target", default="query,value",
+                   help="MoMo 注入的目标 Linear 名称,逗号分隔")
+    p.add_argument("--momo_n_experts", type=int, default=4)
+    p.add_argument("--momo_top_k", type=int, default=2)
+    p.add_argument("--momo_lora_r", type=int, default=8)
+    p.add_argument("--momo_lora_alpha", type=int, default=16)
+    p.add_argument("--momo_lora_dropout", type=float, default=0.0)
+    p.add_argument("--momo_aux_alpha", type=float, default=0.01,
+                   help="MoMo 负载均衡辅助 loss 系数")
     return p.parse_args()
 
 
-def load_text_dataset(data_path: str):
-    if not os.path.exists(data_path):
-        sys.exit(f"[ERROR] 找不到训练语料: {data_path}")
-    ds = load_dataset("text", data_files={"train": data_path})["train"]
-    ds = ds.filter(lambda x: x["text"] is not None and len(x["text"].strip()) >= 4)
-    print(f"[INFO] 加载语料: {len(ds)} 条")
-    if len(ds) < 10:
-        sys.exit(f"[ERROR] 语料过少({len(ds)} 条),无法训练")
-    return ds
+# ---------------------------------------------------------------- data
+def list_corpus_files(data_path: str, extra_dir: str) -> list[str]:
+    """收集主语料 + 额外语料目录下的所有 .txt。"""
+    files = []
+    if data_path and os.path.exists(data_path):
+        files.append(data_path)
+    if extra_dir and os.path.isdir(extra_dir):
+        for fn in sorted(glob.glob(os.path.join(extra_dir, "*.txt"))):
+            if fn not in files:
+                files.append(fn)
+    print(f"[INFO] 加载 {len(files)} 个语料文件:")
+    for f in files:
+        n = sum(1 for _ in open(f, "r", encoding="utf-8"))
+        print(f"  - {f}  ({n} lines)")
+    return files
+
+
+def load_combined_dataset(files: list):
+    """把多个 .txt 合并成一个 HF Dataset(每行一句)。"""
+    from datasets import Dataset
+    rows = []
+    for fp in files:
+        with open(fp, "r", encoding="utf-8") as f:
+            for line in f:
+                t = line.strip()
+                if len(t) >= 4:
+                    rows.append({"text": t})
+    if len(rows) < 10:
+        sys.exit(f"[ERROR] 合并后语料过少({len(rows)} 条),无法训练")
+    print(f"[INFO] 合并语料共 {len(rows)} 条")
+    return Dataset.from_list(rows)
 
 
 def build_features(ds, tokenizer, max_len: int):
@@ -93,33 +142,66 @@ def build_features(ds, tokenizer, max_len: int):
                   desc="Tokenizing")
 
 
-def maybe_apply_lora(model, args):
-    """如果 --use_lora,用 PEFT 包一层 LoRA。"""
+# ---------------------------------------------------------------- lora
+def maybe_apply_peft_lora(model, args):
     if not args.use_lora:
         return model, False
-
     try:
         from peft import LoraConfig, TaskType, get_peft_model
     except ImportError:
-        sys.exit("[ERROR] 启用 --use_lora 但未安装 peft,pip install peft")
-
+        sys.exit("[ERROR] 启用 --use_lora 但未安装 peft")
     target_modules = [m.strip() for m in args.lora_target.split(",") if m.strip()]
     lora_config = LoraConfig(
-        task_type=TaskType.FEATURE_EXTRACTION,  # MLM 走 FEATURE_EXTRACTION
+        task_type=TaskType.FEATURE_EXTRACTION,
         r=args.lora_r,
         lora_alpha=args.lora_alpha,
         lora_dropout=args.lora_dropout,
         target_modules=target_modules,
         bias="none",
-        modules_to_save=["cls"],  # 同时训练 MLM 头,否则 loss 不会下降
+        modules_to_save=["cls"],
     )
     model = get_peft_model(model, lora_config)
     model.print_trainable_parameters()
     return model, True
 
 
+# ---------------------------------------------------------------- momo
+def maybe_apply_momo(model, args):
+    if not args.use_momo:
+        return model, False
+    targets = [m.strip() for m in args.momo_target.split(",") if m.strip()]
+    n = inject_momo_lora(
+        model,
+        target_module_names=targets,
+        n_experts=args.momo_n_experts,
+        top_k=args.momo_top_k,
+        lora_r=args.momo_lora_r,
+        lora_alpha=args.momo_lora_alpha,
+        lora_dropout=args.momo_lora_dropout,
+        aux_loss_alpha=args.momo_aux_alpha,
+    )
+    print(f"[INFO] MoMo: 替换了 {n} 个 Linear -> MoLoRALinear")
+    if n == 0:
+        sys.exit("[ERROR] MoMo 注入了 0 层,请检查 --momo_target (默认 query,value)")
+    # 在 model 上记一下元信息(便于 save)
+    model._momo_n_experts = args.momo_n_experts
+    model._momo_top_k = args.momo_top_k
+    model._momo_lora_r = args.momo_lora_r
+    model._momo_lora_alpha = args.momo_lora_alpha
+    model._momo_lora_dropout = args.momo_lora_dropout
+    model._momo_aux_loss_alpha = args.momo_aux_alpha
+    model._momo_targets = targets
+    # 关键:加 hook 让 Trainer 拿到的 loss 自动加上 MoMo 辅助 loss
+    add_momo_aux_loss_hook(model)
+    return model, True
+
+
+# ---------------------------------------------------------------- main
 def main() -> None:
     args = parse_args()
+    if args.use_lora and args.use_momo:
+        sys.exit("[ERROR] --use_lora 与 --use_momo 互斥,请只选一个")
+
     set_seed(args.seed)
     random.seed(args.seed)
     np.random.seed(args.seed)
@@ -127,11 +209,17 @@ def main() -> None:
 
     os.makedirs(args.output_dir, exist_ok=True)
     print(f"[INFO] 模型: {args.model_name}")
-    print(f"[INFO] 语料: {args.data_path}")
     print(f"[INFO] 输出: {args.output_dir}")
     print(f"[INFO] Epochs={args.epochs}  bs={args.batch_size}  lr={args.lr}")
-    print(f"[INFO] LoRA: {'ON (r=%d, alpha=%d)' % (args.lora_r, args.lora_alpha)
-                       if args.use_lora else 'OFF (全参微调)'}")
+    if args.use_momo:
+        print(f"[INFO] 模式: MoMo  experts={args.momo_n_experts} "
+              f"top_k={args.momo_top_k} r={args.momo_lora_r} "
+              f"alpha={args.momo_lora_alpha} targets={args.momo_target}")
+    elif args.use_lora:
+        print(f"[INFO] 模式: PEFT-LoRA  r={args.lora_r} alpha={args.lora_alpha} "
+              f"targets={args.lora_target}")
+    else:
+        print(f"[INFO] 模式: 全参微调")
 
     # 1. Tokenizer
     tokenizer = AutoTokenizer.from_pretrained(args.model_name, use_fast=True)
@@ -141,15 +229,18 @@ def main() -> None:
     n_params = sum(p.numel() for p in model.parameters())
     print(f"[INFO] base 参数量: {n_params/1e6:.1f}M")
 
-    # 3. 可选 LoRA
-    model, used_lora = maybe_apply_lora(model, args)
-    if used_lora:
-        trainable = sum(p.numel() for p in model.parameters() if p.requires_grad)
-        print(f"[INFO] LoRA trainable: {trainable/1e6:.3f}M "
-              f"({100*trainable/n_params:.4f}%)")
+    # 3. 可选 LoRA / MoMo
+    model, used_peft_lora = maybe_apply_peft_lora(model, args)
+    model, used_momo = maybe_apply_momo(model, args)
+
+    if used_momo:
+        stats = get_momo_param_count(model)
+        print(f"[INFO] MoMo trainable: {stats['momo_params']/1e6:.3f}M "
+              f"({stats['trainable_pct']}%) layers={stats['n_momo_layers']}")
 
     # 4. 数据
-    raw_ds = load_text_dataset(args.data_path)
+    files = list_corpus_files(args.data_path, args.extra_corpus_dir)
+    raw_ds = load_combined_dataset(files)
     tokenized = build_features(raw_ds, tokenizer, args.max_len)
 
     # 5. 数据整理器
@@ -190,17 +281,20 @@ def main() -> None:
     train_result = trainer.train()
     train_seconds = time.time() - t0
 
-    # 7. 保存:LoRA 走两种保存策略
-    if used_lora and args.merge_lora:
+    # 7. 保存
+    if used_peft_lora and args.merge_lora:
         print("[INFO] 合并 LoRA 到 base 并保存完整模型")
         merged = model.merge_and_unload()
         merged.save_pretrained(args.output_dir, safe_serialization=True)
         tokenizer.save_pretrained(args.output_dir)
-    elif used_lora:
-        # 只保存 LoRA adapter
-        print("[INFO] 仅保存 LoRA adapter(注意 evaluate.py 需要先加载 base)")
+    elif used_peft_lora:
+        print("[INFO] 仅保存 LoRA adapter")
         model.save_pretrained(os.path.join(args.output_dir, "adapter"))
         tokenizer.save_pretrained(args.output_dir)
+    elif used_momo:
+        print("[INFO] 保存 MoMo adapter + tokenizer")
+        save_momo_checkpoint(model, tokenizer, args.output_dir,
+                             base_model_name=args.model_name)
     else:
         trainer.save_model(args.output_dir)
         tokenizer.save_pretrained(args.output_dir)
@@ -210,23 +304,32 @@ def main() -> None:
     metrics = {
         "model_name": args.model_name,
         "data_path": args.data_path,
+        "extra_corpus_dir": args.extra_corpus_dir,
+        "n_corpus_files": len(files),
         "n_samples": len(tokenized),
         "epochs": args.epochs,
         "batch_size": args.batch_size,
         "learning_rate": args.lr,
         "max_len": args.max_len,
-        "use_lora": used_lora,
-        "lora_r": args.lora_r if used_lora else None,
-        "lora_alpha": args.lora_alpha if used_lora else None,
-        "lora_target": args.lora_target if used_lora else None,
-        "merge_lora": used_lora and args.merge_lora,
+        "mode": ("momo" if used_momo else ("peft_lora" if used_peft_lora else "full")),
+        "use_lora": used_peft_lora,
+        "lora_r": args.lora_r if used_peft_lora else None,
+        "use_momo": used_momo,
+        "momo_n_experts": args.momo_n_experts if used_momo else None,
+        "momo_top_k": args.momo_top_k if used_momo else None,
+        "momo_target": args.momo_target if used_momo else None,
         "train_runtime_sec": round(train_seconds, 2),
         "train_loss": train_result.training_loss,
         "metrics": train_result.metrics,
         "history": trainer.state.log_history,
     }
+    if used_momo:
+        stats = get_momo_param_count(model)
+        metrics["momo_stats"] = stats
+
     with open(log_path, "w", encoding="utf-8") as f:
         json.dump(metrics, f, ensure_ascii=False, indent=2)
+
     print(f"[INFO] 训练完成,耗时 {train_seconds:.1f}s,最终 loss={train_result.training_loss:.4f}")
     print(f"[INFO] 模型与日志已保存到: {args.output_dir}")
 

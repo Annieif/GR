@@ -1,0 +1,162 @@
+[
+  {
+    "id": "chinese-poetry/chinese-poetry",
+    "config": null,
+    "split": "train",
+    "text_fields": ["content"],
+    "max_samples": 400,
+    "description": "古诗词(全唐诗/全宋词)"
+  },
+  {
+    "id": "liyucheng/chn_senti_corp",
+    "config": null,
+    "split": "train",
+    "text_fields": ["text"],
+    "max_samples": 400,
+    "description": "酒店评论(ChnSentiCorp)"
+  },
+  {
+    "id": "shibing624/chnsenti",
+    "config": null,
+    "split": "train",
+    "text_fields": ["text"],
+    "max_samples": 400,
+    "description": "外卖评论"
+  },
+  {
+    "id": "brightgems/poems-zh",
+    "config": null,
+    "split": "train",
+    "text_fields": ["poem"],
+    "max_samples": 300,
+    "description": "现代诗"
+  },
+  {
+    "id": "huggingface-course/codeparrot-github-issues-zh",
+    "config": null,
+    "split": "train",
+    "text_fields": ["title", "body"],
+    "max_samples": 200,
+    "description": "GitHub 中文 issue"
+  },
+  {
+    "id": "BAAI/COIG-PC",
+    "config": "cc_strict",
+    "split": "train",
+    "text_fields": ["instruction", "output"],
+    "max_samples": 200,
+    "description": "智源中文指令(截取)"
+  },
+  {
+    "id": "BelleGroup/train_3.5M_CN",
+    "config": null,
+    "split": "train",
+    "text_fields": ["instruction", "output"],
+    "max_samples": 200,
+    "description": "Belle 训练集"
+  },
+  {
+    "id": "Cohere/wikipedia-22-12-zh-embed",
+    "config": null,
+    "split": "train",
+    "text_fields": ["text"],
+    "max_samples": 200,
+    "description": "中文维基(嵌入子集)"
+  },
+  {
+    "id": "lansinuote/diffsion_from_scratch.chinese_text",
+    "config": null,
+    "split": "train",
+    "text_fields": ["text"],
+    "max_samples": 300,
+    "description": "古诗续写素材"
+  },
+  {
+    "id": "zxmwd/chinese-poetry",
+    "config": null,
+    "split": "train",
+    "text_fields": ["content"],
+    "max_samples": 300,
+    "description": "中文诗词(镜像)"
+  },
+  {
+    "id": "CubEAU/cmmlu",
+    "config": null,
+    "split": "test",
+    "text_fields": ["Question", "A", "B", "C", "D"],
+    "max_samples": 200,
+    "description": "C-MMLU 中文多任务"
+  },
+  {
+    "id": "liyucheng/chinese_metaphysics_knowledge",
+    "config": null,
+    "split": "train",
+    "text_fields": ["question", "answer"],
+    "max_samples": 200,
+    "description": "玄学知识问答"
+  },
+  {
+    "id": "FreedomIntelligence/medical-o1-reasoning-SFT",
+    "config": "zh",
+    "split": "train",
+    "text_fields": ["question", "answer"],
+    "max_samples": 150,
+    "description": "医学推理(中文)"
+  },
+  {
+    "id": "TrueHealth/AiMed",
+    "config": null,
+    "split": "train",
+    "text_fields": ["question", "answer"],
+    "max_samples": 200,
+    "description": "医学问答"
+  },
+  {
+    "id": "lansinuote/6.2.chinese_classification_corpus",
+    "config": null,
+    "split": "train",
+    "text_fields": ["text"],
+    "max_samples": 400,
+    "description": "中文分类语料(新闻/电商)"
+  },
+  {
+    "id": "Yuan/BooksAndPapers",
+    "config": null,
+    "split": "train",
+    "text_fields": ["title", "abstract"],
+    "max_samples": 200,
+    "description": "论文摘要"
+  },
+  {
+    "id": "liyucheng/Traditional_Chinese_Medicine_Instruction",
+    "config": null,
+    "split": "train",
+    "text_fields": ["instruction", "output"],
+    "max_samples": 200,
+    "description": "中医问答"
+  },
+  {
+    "id": "liyucheng/psychology_10k",
+    "config": null,
+    "split": "train",
+    "text_fields": ["question", "answer"],
+    "max_samples": 200,
+    "description": "心理学问答"
+  },
+  {
+    "id": "shibing624/Chinese-text-classification",
+    "config": null,
+    "split": "train",
+    "text_fields": ["text"],
+    "max_samples": 400,
+    "description": "今日头条新闻分类"
+  },
+  {
+    "id": "hikariming/Chinese-Medicine-1k",
+    "config": null,
+    "split": "train",
+    "text_fields": ["question", "answer"],
+    "max_samples": 200,
+    "description": "中医常识"
+  }
+]
