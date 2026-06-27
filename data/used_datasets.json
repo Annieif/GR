@@ -11,6 +11,12 @@
       "timestamp": "20260627_072714",
       "n_samples": 400,
       "out_path": "data/extra_corpora/20260627_072714_shibing624_nli_zh.txt"
+    },
+    {
+      "id": "FreedomIntelligence/medical-o1-reasoning-SFT",
+      "timestamp": "20260627_074844",
+      "n_samples": 200,
+      "out_path": "data/extra_corpora/20260627_074844_FreedomIntelligence_medical-o1-reasoning-SFT.txt"
     }
   ],
   "history": [
@@ -27,6 +33,13 @@
       "n_samples": 400,
       "out_path": "data/extra_corpora/20260627_072714_shibing624_nli_zh.txt",
       "description": "中文 NLI 句对(ATEC)"
+    },
+    {
+      "id": "FreedomIntelligence/medical-o1-reasoning-SFT",
+      "timestamp": "20260627_074844",
+      "n_samples": 200,
+      "out_path": "data/extra_corpora/20260627_074844_FreedomIntelligence_medical-o1-reasoning-SFT.txt",
+      "description": "医学推理(中文)"
     }
   ]
 }
