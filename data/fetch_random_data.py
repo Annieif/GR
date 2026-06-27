@@ -53,10 +53,13 @@ def save_manifest(m: dict) -> None:
 def verify_exists(ds_id: str, config: str | None = None,
                   timeout: int = 8) -> tuple[bool, str]:
     """用 HfApi.dataset_info 做 HEAD 风格校验。返回 (是否存在, 错误信息)。"""
-    try:
+    @with_retry
+    def _do():
         from huggingface_hub import HfApi
         api = HfApi()
         api.dataset_info(ds_id, config_name=config, timeout=timeout)
+    try:
+        _do()
         return True, ""
     except Exception as e:
         return False, f"{type(e).__name__}: {str(e)[:120]}"
@@ -131,13 +134,16 @@ def fetch_one(entry: dict, max_samples: int) -> tuple[int, str]:
     limit = min(max_samples, per_dataset_cap)
 
     print(f"[INFO] load_dataset({ds_id}, config={config}, split={split}) ...")
-    try:
+    @with_retry
+    def _load():
         if config:
-            ds = load_dataset(ds_id, config, split=split, trust_remote_code=True)
+            return load_dataset(ds_id, config, split=split, trust_remote_code=True)
         else:
-            ds = load_dataset(ds_id, split=split, trust_remote_code=True)
+            return load_dataset(ds_id, split=split, trust_remote_code=True)
+    try:
+        ds = _load()
     except Exception as e:
-        raise RuntimeError(f"load_dataset 失败: {e}")
+        raise RuntimeError(f"load_dataset 失败(已重试 3 次): {e}")
 
     cols = list(ds.column_names)
     string_fields = get_string_fields(ds)

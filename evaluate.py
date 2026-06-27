@@ -69,6 +69,8 @@ def parse_args() -> argparse.Namespace:
     p.add_argument("--mlm_prob", type=float, default=0.15)
     p.add_argument("--skip_base", action="store_true",
                    help="跳过 base 模型评估(只评微调后)")
+    p.add_argument("--max_eval_samples", type=int, default=-1,
+                   help="最多评估多少条样本(默认 -1 = 全部),用于快速验证/CI")
     p.add_argument("--seed", type=int, default=42)
     return p.parse_args()
 
@@ -82,6 +84,20 @@ def load_eval_data(path: str):
     if len(ds) < 5:
         sys.exit(f"[ERROR] 评估语料过少({len(ds)} 条),无法评估")
     return ds
+
+
+def prepare_eval_tokenized(eval_ds, tokenizer, args):
+    """对评估语料做一次性 tokenize。后续 PPL/Acc/demos 都共享。"""
+    def tokenize_fn(batch):
+        return tokenizer(batch["text"], truncation=True,
+                         padding="max_length", max_length=args.max_len)
+    # 按 max_eval_samples 截断
+    if args.max_eval_samples > 0 and len(eval_ds) > args.max_eval_samples:
+        eval_ds = eval_ds.select(range(args.max_eval_samples))
+        print(f"[INFO] 评估样本数截断到 {len(eval_ds)}")
+    tokenized = eval_ds.map(tokenize_fn, batched=True, remove_columns=["text"])
+    print(f"[INFO] tokenize 完成: {len(tokenized)} 样本")
+    return tokenized
 
 
 def load_model_any(path: str, tokenizer):
@@ -151,17 +167,11 @@ def load_model_any(path: str, tokenizer):
 
 
 @torch.no_grad()
-def compute_perplexity(model, tokenizer, eval_ds, args) -> float:
-    """整体 MLM 困惑度。"""
-    def tokenize_fn(batch):
-        return tokenizer(batch["text"], truncation=True,
-                         padding="max_length", max_length=args.max_len)
-    tokenized = eval_ds.map(tokenize_fn, batched=True, remove_columns=["text"])
-
+def compute_perplexity(model, tokenizer, tokenized, args) -> float:
+    """整体 MLM 困惑度(tokenized 必须已被 tokenize_fn 处理过)。"""
     collator = DataCollatorForLanguageModeling(
         tokenizer=tokenizer, mlm=True, mlm_probability=args.mlm_prob
     )
-    # 手动 batch 评估
     from torch.utils.data import DataLoader
     loader = DataLoader(tokenized, batch_size=args.batch_size,
                         collate_fn=collator, num_workers=0)
@@ -172,9 +182,7 @@ def compute_perplexity(model, tokenizer, eval_ds, args) -> float:
     for batch in loader:
         batch = {k: v.to(model.device) for k, v in batch.items()}
         out = model(**batch)
-        # loss 是平均到每个 token 的交叉熵
         labels = batch["labels"]
-        # 统计真实参与 loss 的 token(label != -100,即被 mask 的)
         n = (labels != -100).sum().item()
         if n == 0:
             continue
@@ -189,13 +197,9 @@ def compute_perplexity(model, tokenizer, eval_ds, args) -> float:
 
 
 @torch.no_grad()
-def compute_mask_accuracy(model, tokenizer, eval_ds, args,
+def compute_mask_accuracy(model, tokenizer, tokenized, args,
                           k_list=(1, 5)) -> dict:
-    """Top-k masked token accuracy。"""
-    def tokenize_fn(batch):
-        return tokenizer(batch["text"], truncation=True,
-                         padding="max_length", max_length=args.max_len)
-    tokenized = eval_ds.map(tokenize_fn, batched=True, remove_columns=["text"])
+    """Top-k masked token accuracy(tokenized 必须已被 tokenize_fn 处理过)。"""
     collator = DataCollatorForLanguageModeling(
         tokenizer=tokenizer, mlm=True, mlm_probability=args.mlm_prob
     )
@@ -203,7 +207,6 @@ def compute_mask_accuracy(model, tokenizer, eval_ds, args,
     loader = DataLoader(tokenized, batch_size=args.batch_size,
                         collate_fn=collator, num_workers=0)
 
-    # 统计 top-k 命中
     max_k = max(k_list)
     correct = {k: 0 for k in k_list}
     total = 0
@@ -215,13 +218,10 @@ def compute_mask_accuracy(model, tokenizer, eval_ds, args,
         if mask.sum() == 0:
             continue
         out = model(**batch)
-        logits = out.logits  # [B, L, V]
-        # 取 top-k 预测
-        topk = logits.topk(max_k, dim=-1).indices  # [B, L, max_k]
-        # 把 labels 扩展到 [B, L, max_k] 比对
+        logits = out.logits
+        topk = logits.topk(max_k, dim=-1).indices
         labels_exp = labels.unsqueeze(-1).expand_as(topk)
-        # 命中判断
-        hit = (topk == labels_exp) & mask.unsqueeze(-1)  # [B, L, max_k]
+        hit = (topk == labels_exp) & mask.unsqueeze(-1)
         for k in k_list:
             correct[k] += hit[..., :k].any(dim=-1).sum().item()
         total += mask.sum().item()
@@ -257,7 +257,7 @@ def run_fill_mask_demos(model, tokenizer, sentences: List[str],
     return results
 
 
-def evaluate_one(name: str, model_path: str, tokenizer, eval_ds, args) -> dict:
+def evaluate_one(name: str, model_path: str, tokenizer, tokenized, args) -> dict:
     print(f"\n========== 评估 [{name}] ==========")
     t0 = time.time()
     model = load_model_any(model_path, tokenizer).to("cpu")
@@ -268,8 +268,8 @@ def evaluate_one(name: str, model_path: str, tokenizer, eval_ds, args) -> dict:
         model = model.to("mps")
     model.eval()
 
-    ppl = compute_perplexity(model, tokenizer, eval_ds, args)
-    acc = compute_mask_accuracy(model, tokenizer, eval_ds, args)
+    ppl = compute_perplexity(model, tokenizer, tokenized, args)
+    acc = compute_mask_accuracy(model, tokenizer, tokenized, args)
     demos = run_fill_mask_demos(model, tokenizer, DEMO_SENTENCES, top_k=TOP_K)
 
     # 释放显存
@@ -331,14 +331,15 @@ def main() -> None:
         "demo_sentences": DEMO_SENTENCES,
     }
 
+    # 一次性 tokenize,base 和 ft 共享(避免重复 ~200MB 数据的 tokenize)
+    tokenized = prepare_eval_tokenized(eval_ds, tokenizer, args)
+
     base_res = None
     if not args.skip_base:
-        base_res = evaluate_one("BASE", args.base_model, tokenizer, eval_ds, args,
-                                base_model_name=args.base_model)
+        base_res = evaluate_one("BASE", args.base_model, tokenizer, tokenized, args)
         results["base"] = base_res
 
-    ft_res = evaluate_one("FINETUNED", args.ft_model, tokenizer, eval_ds, args,
-                          base_model_name=args.base_model)
+    ft_res = evaluate_one("FINETUNED", args.ft_model, tokenizer, tokenized, args)
     results["finetuned"] = ft_res
 
     results["comparison"] = make_comparison(base_res, ft_res)

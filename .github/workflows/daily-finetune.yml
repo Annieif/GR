@@ -174,14 +174,18 @@ jobs:
           echo "--- 关键版本 ---"
           python -c "import torch, transformers, datasets, peft; print(f'torch={torch.__version__}'); print(f'transformers={transformers.__version__}'); print(f'datasets={datasets.__version__}'); print(f'peft={peft.__version__}')"
 
-      # ---------- 5. 检查数据 ----------
-      - name: Verify corpora
+      # ---------- 5. 检查数据 + 预校验候选池 ----------
+      - name: Verify corpora + validate candidate pool
         run: |
           echo "--- 主语料 ---"; wc -l data/corpus.txt
           echo "--- 评估语料 ---"; wc -l data/eval.txt
           echo "--- 历史 extra corpora ---"; ls -la data/extra_corpora/ 2>/dev/null || echo "(无)"
           echo "--- 候选池大小 ---"; python -c "import json; print(len(json.load(open('data/dataset_pool.json'))))"
           echo "--- 已用 ---"; cat data/used_datasets.json
+          echo ""
+          echo ">>>>> 预校验候选池(列出无效的,但不中断 workflow)"
+          python data/fetch_random_data.py --validate_only --max_samples 10 || echo "::warning::候选池里部分数据集失效(详见上方)"
+          echo "<<<<< validate_only 完成"
 
       # ---------- 6. 拉取一个随机新数据集 ----------
       - name: Fetch random Chinese dataset

@@ -313,13 +313,13 @@ def merge_momo_into_base(model: nn.Module) -> nn.Module:
     for name, module in list(model.named_modules()):
         if not isinstance(module, MoLoRALinear):
             continue
-        # 累计每个 expert 的 LoRA 贡献(均匀加权)
+        # 向量化:einsum 一次性算所有 expert 的 LoRA 贡献,再在 expert 维求平均
+        #   lora_B: (n_experts, out, r), lora_A: (n_experts, r, in)
+        #   out_per_expert: (n_experts, out, in)
         device = module.base.weight.device
         dtype = module.base.weight.dtype
-        lora_contrib = module.lora_B[0] @ module.lora_A[0] * module.scaling
-        for i in range(1, module.n_experts):
-            lora_contrib = lora_contrib + (module.lora_B[i] @ module.lora_A[i] * module.scaling)
-        lora_contrib = lora_contrib / module.n_experts  # 均匀加权
+        out_per_expert = torch.einsum('nor,nri->noi', module.lora_B, module.lora_A)
+        lora_contrib = out_per_expert.mean(dim=0) * module.scaling
 
         new_weight = module.base.weight.data + lora_contrib.to(device=device, dtype=dtype)
         new_linear = nn.Linear(module.in_features, module.out_features,

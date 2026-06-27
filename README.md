@@ -7,6 +7,7 @@
 
 ## ✨ 项目目标
 
+[![Daily Fine-tune](https://github.com/Annieif/GR/actions/workflows/daily-finetune.yml/badge.svg)](https://github.com/Annieif/GR/actions/workflows/daily-finetune.yml)
 ![Daily Fine-tune](https://img.shields.io/badge/daily-fine--tune-blueviolet?style=flat-square)
 ![Model](https://img.shields.io/badge/model-MacBERT--base-orange?style=flat-square)
 ![LoRA+MoE](https://img.shields.io/badge/LoRA%2BMoE-yes-success?style=flat-square)
@@ -227,6 +228,20 @@ Release body 包含训练摘要(模式、base、loss、耗时)、评估对比(ba
    - 创建 release `daily-20260628T020000Z`
 
 3. **第 3 天、第 4 天**...依此类推,模型在每天的新数据上微调,效果逐步累积。
+
+```
+累积示意:
+
+Day 1:  [base/macbert-base] ──微调──> Release v1
+                                    ↓
+Day 2:  [Release v1]        ──微调──> Release v2
+                                    ↓
+Day 3:  [Release v2]        ──微调──> Release v3
+                                    ↓
+...     (每天增量,新数据集)
+```
+
+每天的 release 都包含完整 HF 模型,任何一天都可以中断/恢复。
 
 ### 跳过累积 / 强制从 base 重来
 

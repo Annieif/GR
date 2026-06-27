@@ -75,6 +75,8 @@ def parse_args() -> argparse.Namespace:
                    help="训练最大步数(默认 -1 = 用 epochs),用于快速试跑或限速")
     p.add_argument("--resume_from_checkpoint", default=None,
                    help="从某个 checkpoint 目录恢复训练(transformers Trainer 原生支持)")
+    p.add_argument("--dry_run", action="store_true",
+                   help="只做加载数据 + 模型 + 1 步训练就退出,用于快速验证环境")
     p.add_argument("--save_total_limit", type=int, default=1)
 
     # ---- PEFT LoRA ----
@@ -104,7 +106,7 @@ def parse_args() -> argparse.Namespace:
 
 # ---------------------------------------------------------------- data
 def list_corpus_files(data_path: str, extra_dir: str) -> list[str]:
-    """收集主语料 + 额外语料目录下的所有 .txt。"""
+    """收集主语料 + 额外语料目录下的所有 .txt,统计每文件行数。"""
     files = []
     if data_path and os.path.exists(data_path):
         files.append(data_path)
@@ -113,9 +115,16 @@ def list_corpus_files(data_path: str, extra_dir: str) -> list[str]:
             if fn not in files:
                 files.append(fn)
     print(f"[INFO] 加载 {len(files)} 个语料文件:")
+    total_lines = 0
     for f in files:
-        n = sum(1 for _ in open(f, "r", encoding="utf-8"))
-        print(f"  - {f}  ({n} lines)")
+        with open(f, "r", encoding="utf-8") as fp:
+            lines = fp.readlines()
+        n = len(lines)
+        # 估算平均字符数
+        avg_chars = sum(len(l.strip()) for l in lines) / max(n, 1)
+        total_lines += n
+        print(f"  - {f}  ({n} lines, ~{avg_chars:.0f} chars/line)")
+    print(f"[INFO] 总行数: {total_lines}")
     return files
 
 
@@ -253,6 +262,35 @@ def main() -> None:
     collator = DataCollatorForLanguageModeling(
         tokenizer=tokenizer, mlm=True, mlm_probability=args.mlm_prob
     )
+
+    # 5.5 dry-run:验证一切就绪,跑 1 步就退出
+    if args.dry_run:
+        print("[DRY-RUN] 验证环境:数据 / 模型 / 1 步训练")
+        # 用一个小子集做 1 步训练
+        small_ds = tokenized.select(range(min(8, len(tokenized))))
+        small_args = TrainingArguments(
+            output_dir=os.path.join(args.output_dir, "_dryrun"),
+            overwrite_output_dir=True,
+            num_train_epochs=1,
+            max_steps=1,
+            per_device_train_batch_size=2,
+            learning_rate=args.lr,
+            logging_steps=1,
+            report_to=[],
+            seed=args.seed,
+            fp16=torch.cuda.is_available(),
+            disable_tqdm=True,
+        )
+        small_trainer = Trainer(
+            model=model,
+            args=small_args,
+            data_collator=collator,
+            train_dataset=small_ds,
+            tokenizer=tokenizer,
+        )
+        small_trainer.train()
+        print("[DRY-RUN] 一切就绪 ✅")
+        return
 
     # 6. 训练参数
     fp16_ok = torch.cuda.is_available()
