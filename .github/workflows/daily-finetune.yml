@@ -126,15 +126,17 @@ jobs:
       HF_TOKEN: ${{ secrets.HF_TOKEN }}   # 提升到 job 层,让 if 条件可读
 
     steps:
-      # ---------- 0. 释放磁盘 ----------
+      # ---------- 0. 释放磁盘(社区优化版,比 rm -rf 快得多)----------
       - name: Free up disk space
-        run: |
-          echo "清理前:"
-          df -h /
-          sudo rm -rf /usr/share/dotnet /usr/local/lib/android /opt/ghc
-          sudo rm -rf "$AGENT_TOOLSDIRECTORY/CodeQL" 2>/dev/null || true
-          echo "清理后:"
-          df -h /
+        uses: jlumbroso/free-disk-space@main
+        with:
+          tool-cache: true
+          android: true
+          dotnet: true
+          haskell: true
+          large-packages: true
+          docker-images: false
+          swap-storage: false
 
       # ---------- 1. 拉取代码 ----------
       - name: Checkout repository
