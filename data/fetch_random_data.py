@@ -50,6 +50,28 @@ def save_manifest(m: dict) -> None:
         json.dump(m, f, ensure_ascii=False, indent=2)
 
 
+import time
+
+
+def with_retry(fn, attempts: int = 3, base_delay: float = 2.0):
+    """简单重试:对网络/Hub 临时错误做指数退避。"""
+    def wrapped(*args, **kwargs):
+        last_err = None
+        for i in range(attempts):
+            try:
+                return fn(*args, **kwargs)
+            except Exception as e:
+                last_err = e
+                if i < attempts - 1:
+                    delay = base_delay * (2 ** i)
+                    print(f"[WARN] {fn.__name__} 第 {i+1}/{attempts} 次失败 "
+                          f"({type(e).__name__}: {str(e)[:80]}),"
+                          f"{delay:.1f}s 后重试 ...", file=sys.stderr)
+                    time.sleep(delay)
+        raise last_err
+    return wrapped
+
+
 def verify_exists(ds_id: str, config: str | None = None,
                   timeout: int = 8) -> tuple[bool, str]:
     """用 HfApi.dataset_info 做 HEAD 风格校验。返回 (是否存在, 错误信息)。"""
