@@ -122,6 +122,9 @@ jobs:
       contents: write   # 允许把日志推回 main
       actions: read
 
+    env:
+      HF_TOKEN: ${{ secrets.HF_TOKEN }}   # 提升到 job 层,让 if 条件可读
+
     steps:
       # ---------- 0. 释放磁盘 ----------
       - name: Free up disk space
@@ -516,7 +519,7 @@ jobs:
         if: |
           github.event_name == 'workflow_dispatch' &&
           github.event.inputs.push_to_hub == 'true' &&
-          secrets.HF_TOKEN != ''
+          env.HF_TOKEN != ''
         env:
           HF_TOKEN: ${{ secrets.HF_TOKEN }}
           HF_HUB_DISABLE_PROGRESS_BARS: '1'
