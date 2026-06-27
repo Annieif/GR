@@ -54,12 +54,14 @@ import time
 
 
 def with_retry(fn, attempts: int = 3, base_delay: float = 2.0):
-    """简单重试:对网络/Hub 临时错误做指数退避。"""
+    """简单重试:只对网络/Hub 临时错误做指数退避,代码错误直接抛。"""
     def wrapped(*args, **kwargs):
         last_err = None
         for i in range(attempts):
             try:
                 return fn(*args, **kwargs)
+            except (TypeError, ValueError, AttributeError, ImportError):
+                raise   # 代码错误,不重试
             except Exception as e:
                 last_err = e
                 if i < attempts - 1:
@@ -79,7 +81,7 @@ def verify_exists(ds_id: str, config: str | None = None,
     def _do():
         from huggingface_hub import HfApi
         api = HfApi()
-        api.dataset_info(ds_id, config_name=config, timeout=timeout)
+        api.dataset_info(ds_id, timeout=timeout)
     try:
         _do()
         return True, ""
